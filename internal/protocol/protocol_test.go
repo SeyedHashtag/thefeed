@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestSerializeParseMetadata(t *testing.T) {
@@ -35,6 +36,29 @@ func TestSerializeParseMetadata(t *testing.T) {
 	}
 }
 
+func TestSerializeMetadataTruncatesLongUTF8Names(t *testing.T) {
+	name := string(bytes.Repeat([]byte("a"), 254)) + "خبر"
+	parsed, err := ParseMetadata(SerializeMetadata(&Metadata{
+		Channels: []ChannelInfo{{Name: name, Blocks: 1}},
+	}))
+	if err != nil {
+		t.Fatalf("ParseMetadata: %v", err)
+	}
+	if len(parsed.Channels) != 1 {
+		t.Fatalf("channels = %d, want 1", len(parsed.Channels))
+	}
+	got := parsed.Channels[0].Name
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated name is invalid UTF-8: %q", got)
+	}
+	if len(got) > 255 {
+		t.Fatalf("truncated name is %d bytes, want <= 255", len(got))
+	}
+	if got != string(bytes.Repeat([]byte("a"), 254)) {
+		t.Fatalf("truncated name = %q", got)
+	}
+}
+
 func TestMetadataFlags(t *testing.T) {
 	for _, tc := range []struct {
 		tg, chat bool
@@ -47,6 +71,26 @@ func TestMetadataFlags(t *testing.T) {
 		if got.TelegramLoggedIn != tc.tg || got.ChatAvailable != tc.chat {
 			t.Fatalf("flags tg=%v chat=%v -> got tg=%v chat=%v", tc.tg, tc.chat, got.TelegramLoggedIn, got.ChatAvailable)
 		}
+	}
+}
+
+func TestEncodeTitlesDataTruncatesLongUTF8Values(t *testing.T) {
+	longTitle := string(bytes.Repeat([]byte("b"), 254)) + "世界"
+	got, err := DecodeTitlesData(EncodeTitlesData(map[string]string{
+		"news": longTitle,
+	}))
+	if err != nil {
+		t.Fatalf("DecodeTitlesData: %v", err)
+	}
+	title := got["news"]
+	if !utf8.ValidString(title) {
+		t.Fatalf("truncated title is invalid UTF-8: %q", title)
+	}
+	if len(title) > 255 {
+		t.Fatalf("truncated title is %d bytes, want <= 255", len(title))
+	}
+	if title != string(bytes.Repeat([]byte("b"), 254)) {
+		t.Fatalf("truncated title = %q", title)
 	}
 }
 
