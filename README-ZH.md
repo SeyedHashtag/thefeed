@@ -272,6 +272,31 @@ optional caption
 | `--github-relay-repo` | `THEFEED_GITHUB_RELAY_REPO` | — | `owner/repo` |
 | `--github-relay-branch` | `THEFEED_GITHUB_RELAY_BRANCH` | `main` | 分支 |
 | `--github-relay-max-size` | `THEFEED_GITHUB_RELAY_MAX_SIZE_KB` | `15360` KB | 单文件上限 |
+| `--github-relay-quota-gb` | `THEFEED_GITHUB_RELAY_QUOTA_GB` | `100` GB | 仓库容量预算（用于告警） |
+
+### ⚠ 中继仓库只会不断变大 —— 请留意其体积
+
+中继对象以 git 提交的形式写入，而 **git 历史会保留每一个 blob**。TTL 清理只是把
+文件从当前树中删除，并**不会**回收空间：仓库只会越来越大，直到 GitHub 以
+`403 Repository is above its size quota` 拒绝推送（实测约 100 GB）。到那时中继既
+无法上传也无法清理，`git push --force` 同样无济于事，因为 GitHub 不会按需执行垃圾
+回收。
+
+服务器会为你做的事：
+
+- 每 30 分钟读取仓库体积，在达到 `--github-relay-quota-gb` 的 **70%** 和 **90%**
+  时写入告警日志。
+- 在 `thefeed-server --report` 的 **Media cache & relay** 一节显示仓库体积、剩余
+  空间、队列长度与最近一次错误。
+- 每个文件到达时立即上传，内存中只保留返回的对象 id，因此仓库写满或 GitHub 不可达时
+  会退回 DNS 媒体路径，而不是内存一直增长直到进程被 OOM 杀死。
+
+你需要做的事：**在 GitHub 上删除该仓库，再用同名重新创建。** 服务器会检测到空仓库，
+重置其对象索引，并按需重新上传 —— 无需手动清理状态。在中继为空期间，媒体仍可通过
+DNS 获取。
+
+请**每台服务器使用独立仓库**。两台服务器共用一个仓库是安全的（路径按域名的 HMAC
+隔离，彼此无法删除对方的文件），但它们会争用同一分支，并共享同一容量预算。
 
 ---
 

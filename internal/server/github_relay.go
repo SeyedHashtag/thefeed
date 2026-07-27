@@ -25,6 +25,33 @@ var githubAPI = "https://api.github.com"
 
 const flushBatchLimit = 100
 
+// uploadConcurrency bounds simultaneous blob uploads. GitHub asks clients not
+// to fire mutating requests at high concurrency (secondary rate limits), so
+// keep this small — it is a few-at-a-time pipeline, not a fan-out.
+const uploadConcurrency = 4
+
+// maxReadyObjects bounds the commit queue. Entries are SHA-only (~60 bytes),
+// so this is a sanity backstop, not a memory concern.
+const maxReadyObjects = 50000
+
+// defaultRepoQuotaKB is GitHub's observed per-repo hard ceiling (~100 GB),
+// used only to report headroom. GitHub doesn't expose the real quota.
+const defaultRepoQuotaKB int64 = 100 * 1024 * 1024
+
+// Warn thresholds as a fraction of the quota. Recovery needs a manual repo
+// recreate, so the operator has to hear about it well before the wall.
+const (
+	repoWarnFraction   = 0.70
+	repoUrgentFraction = 0.90
+)
+
+// Flush backoff after a failed commit; a quota-exhausted repo never
+// self-heals, so retrying every cycle only burns API calls.
+const (
+	minFlushBackoff = 1 * time.Minute
+	maxFlushBackoff = 30 * time.Minute
+)
+
 // GitHubRelay uploads encrypted media to a GitHub repo. Domain and object
 // names are HMAC'd; blobs are AES-256-GCM. Uploads are batched into one
 // Git Data API commit per flush.
@@ -39,9 +66,28 @@ type GitHubRelay struct {
 
 	mu        sync.Mutex
 	known     map[string]*ghEntry
-	pending   map[string]*pendingUpload
+	ready     map[string]*readyObject
 	statePath string
 	dirty     bool
+
+	// uploadSem bounds concurrent blob uploads; see uploadConcurrency.
+	uploadSem chan struct{}
+
+	failStreak     int
+	retryAfter     time.Time
+	quotaExhausted bool
+	lastFlushErr   string
+
+	// readyGen is bumped whenever every queued SHA becomes invalid (the remote
+	// repo was recreated). A flush that started before the bump must not
+	// re-queue its batch: those blobs live in a repo that no longer exists.
+	readyGen uint64
+
+	// Repo size from the API; refreshed periodically, not per upload.
+	repoSizeKB   int64
+	repoQuotaKB  int64
+	repoSizeAt   time.Time
+	repoWarnedAt float64 // highest fraction already warned about
 
 	// commitMu serialises ref-advancing operations so concurrent flushes
 	// don't race on updateRef.
@@ -54,11 +100,24 @@ type ghEntry struct {
 	lastSeen time.Time
 }
 
-type pendingUpload struct {
-	blob []byte
+// readyObject is a blob already uploaded to GitHub, waiting only to be made
+// reachable by a commit. Holding the SHA instead of the bytes is what keeps
+// the queue at ~60 bytes per file rather than megabytes.
+type readyObject struct {
+	sha  string
 	size int64
 	crc  uint32
+	// commitFails counts consecutive failed commit attempts. An uploaded blob
+	// is unreachable until it lands in a commit, and GitHub eventually garbage
+	// collects unreachable objects — once that happens the SHA is dead and
+	// every later commit referencing it fails the same way. Give up after
+	// maxCommitAttempts so a dead SHA can't wedge the queue forever.
+	commitFails int
 }
+
+// maxCommitAttempts bounds how often a queued SHA is retried before it is
+// dropped (the file is then re-uploaded the next time upstream offers it).
+const maxCommitAttempts = 5
 
 // NewGitHubRelay returns nil when the config is incomplete.
 func NewGitHubRelay(cfg GitHubRelayConfig, domain, passphrase string) *GitHubRelay {
@@ -74,15 +133,20 @@ func NewGitHubRelay(cfg GitHubRelayConfig, domain, passphrase string) *GitHubRel
 		branch = "main"
 	}
 	r := &GitHubRelay{
-		cfg:        cfg,
-		passphrase: passphrase,
-		domain:     protocol.RelayDomainSegment(domain, passphrase),
-		relayKey:   relayKey,
-		branch:     branch,
-		client:    &http.Client{Timeout: 2 * time.Minute},
-		known:     make(map[string]*ghEntry),
-		pending:   make(map[string]*pendingUpload),
-		statePath: cfg.StatePath,
+		cfg:         cfg,
+		passphrase:  passphrase,
+		domain:      protocol.RelayDomainSegment(domain, passphrase),
+		relayKey:    relayKey,
+		branch:      branch,
+		client:      &http.Client{Timeout: 2 * time.Minute},
+		known:       make(map[string]*ghEntry),
+		ready:       make(map[string]*readyObject),
+		uploadSem:   make(chan struct{}, uploadConcurrency),
+		statePath:   cfg.StatePath,
+		repoQuotaKB: cfg.QuotaKB,
+	}
+	if r.repoQuotaKB <= 0 {
+		r.repoQuotaKB = defaultRepoQuotaKB
 	}
 	if r.statePath != "" {
 		if err := r.loadState(); err != nil {
@@ -186,7 +250,11 @@ func (g *GitHubRelay) Domain() string {
 	return g.domain
 }
 
-// Upload encrypts body and queues it for the next batched commit.
+// Upload encrypts body, pushes the blob to GitHub immediately, and queues only
+// the resulting SHA for the next batched commit. Uploading eagerly (rather than
+// holding bytes until commit time) keeps the queue at ~60 bytes per file and
+// lets uploads overlap; a git blob SHA is a hash of the content, so a retry
+// after failure is idempotent and never grows the repo.
 // ErrTooLarge if body exceeds the configured cap.
 func (g *GitHubRelay) Upload(ctx context.Context, body []byte) error {
 	if g == nil {
@@ -207,42 +275,203 @@ func (g *GitHubRelay) Upload(ctx context.Context, body []byte) error {
 		g.mu.Unlock()
 		return nil
 	}
-	if _, ok := g.pending[key]; ok {
+	if _, ok := g.ready[key]; ok {
+		g.mu.Unlock()
+		return nil
+	}
+	// While backed off (typically a size-quota rejection) don't even encrypt:
+	// the upload would fail anyway, and skipping it keeps memory flat.
+	if time.Now().Before(g.retryAfter) {
+		g.mu.Unlock()
+		return nil
+	}
+	if len(g.ready) >= maxReadyObjects {
 		g.mu.Unlock()
 		return nil
 	}
 	g.mu.Unlock()
 
+	// Bounded concurrency. The caller is already a background goroutine, so
+	// waiting here never delays the DNS path. Encrypt *after* the semaphore:
+	// a goroutine waiting its turn would otherwise sit on a full ciphertext
+	// copy on top of the plaintext it already holds.
+	select {
+	case g.uploadSem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	blob, err := protocol.EncryptRelayBlob(g.relayKey, body)
 	if err != nil {
+		<-g.uploadSem
 		return fmt.Errorf("encrypt relay blob: %w", err)
+	}
+	sha, err := g.createBlob(ctx, blob)
+	<-g.uploadSem
+	if err != nil {
+		// Only a size-quota rejection arms the global backoff. Arming it for
+		// any transient error (a 502, a timeout on one large file) would make
+		// Upload silently drop every file for the next 1–30 minutes — and
+		// relay-only files, which are too big for DNS, have no fallback.
+		g.mu.Lock()
+		if isQuotaExhausted(err) {
+			g.noteFlushFailureLocked(err)
+		} else {
+			g.lastFlushErr = trimErrBody(err.Error())
+		}
+		g.mu.Unlock()
+		return fmt.Errorf("create blob: %w", err)
 	}
 
 	g.mu.Lock()
-	if e, ok := g.known[key]; ok {
-		e.lastSeen = time.Now()
-		g.dirty = true
+	if _, ok := g.known[key]; ok {
 		g.mu.Unlock()
 		return nil
 	}
-	if _, ok := g.pending[key]; ok {
-		g.mu.Unlock()
-		return nil
-	}
-	g.pending[key] = &pendingUpload{blob: blob, size: size, crc: crc}
-	overLimit := len(g.pending) >= flushBatchLimit
+	g.ready[key] = &readyObject{sha: sha, size: size, crc: crc}
+	overLimit := len(g.ready) >= flushBatchLimit
 	g.mu.Unlock()
 
 	if overLimit {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-			if err := g.flushPending(ctx); err != nil {
+			if err := g.flushPending(ctx, false); err != nil {
 				log.Printf("[gh-relay] limit flush: %v", err)
 			}
 		}()
 	}
 	return nil
+}
+
+// RelayStatus is a snapshot of relay health for the hourly report.
+type RelayStatus struct {
+	Repo         string  `json:"repo"`
+	RepoSizeKB   int64   `json:"repoSizeKB"`
+	QuotaKB      int64   `json:"quotaKB"`
+	PercentUsed  float64 `json:"percentUsed"`
+	PendingFiles int     `json:"pendingFiles"`
+	KnownObjects int     `json:"knownObjects"`
+	Quota403     bool    `json:"quotaExhausted"`
+	FailStreak   int     `json:"failStreak"`
+	LastError    string  `json:"lastError,omitempty"`
+}
+
+// Status reports relay health. Uses the last polled repo size; call
+// RefreshRepoSize to update it.
+func (g *GitHubRelay) Status() *RelayStatus {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	quota := g.repoQuotaKB
+	if quota <= 0 {
+		quota = defaultRepoQuotaKB
+	}
+	var pct float64
+	if quota > 0 && g.repoSizeKB > 0 {
+		pct = float64(g.repoSizeKB) / float64(quota) * 100
+	}
+	return &RelayStatus{
+		Repo:         g.cfg.Repo,
+		RepoSizeKB:   g.repoSizeKB,
+		QuotaKB:      quota,
+		PercentUsed:  pct,
+		PendingFiles: len(g.ready),
+		KnownObjects: len(g.known),
+		Quota403:     g.quotaExhausted,
+		FailStreak:   g.failStreak,
+		LastError:    g.lastFlushErr,
+	}
+}
+
+// RefreshRepoSize polls the repo's size and warns as it approaches the quota.
+// Only needs metadata:read, which every token carries. Deleting files can't
+// reclaim space (git history keeps every blob), so the warning tells the
+// operator to recreate the repo before uploads start failing.
+func (g *GitHubRelay) RefreshRepoSize(ctx context.Context) error {
+	if g == nil {
+		return nil
+	}
+	req, err := g.newReq(ctx, http.MethodGet, "/repos/"+g.cfg.Repo, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("repo metadata: %s — %s", resp.Status, ghErrorBody(resp))
+	}
+	var out struct {
+		Size int64 `json:"size"` // KB
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return err
+	}
+
+	g.mu.Lock()
+	g.repoSizeKB = out.Size
+	g.repoSizeAt = time.Now()
+	quota := g.repoQuotaKB
+	if quota <= 0 {
+		quota = defaultRepoQuotaKB
+	}
+	frac := float64(out.Size) / float64(quota)
+	repo := g.cfg.Repo
+	warn := ""
+	switch {
+	case frac >= repoUrgentFraction && g.repoWarnedAt < repoUrgentFraction:
+		g.repoWarnedAt = repoUrgentFraction
+		warn = "urgent"
+	case frac >= repoWarnFraction && g.repoWarnedAt < repoWarnFraction:
+		g.repoWarnedAt = repoWarnFraction
+		warn = "warn"
+	case frac < repoWarnFraction:
+		g.repoWarnedAt = 0
+	}
+	g.mu.Unlock()
+
+	if warn != "" {
+		log.Printf("[gh-relay] repo %s is %.0f%% of its %d GB size budget (%d GB used). "+
+			"Pruning cannot shrink it — git history keeps every blob. Delete and recreate the repo "+
+			"before uploads start failing; the relay re-uploads on demand and clients fall back to DNS meanwhile.",
+			repo, frac*100, quota/(1024*1024), out.Size/(1024*1024))
+	}
+	return nil
+}
+
+// isQuotaExhausted reports GitHub's "above its size quota" rejection, which
+// needs a manual repo recreate and never clears on its own.
+func isQuotaExhausted(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "above its size quota")
+}
+
+// noteFlushFailureLocked records a failed flush and arms the backoff timer.
+// Caller must hold g.mu.
+func (g *GitHubRelay) noteFlushFailureLocked(err error) {
+	g.failStreak++
+	if err != nil {
+		g.lastFlushErr = trimErrBody(err.Error())
+	}
+	backoff := minFlushBackoff << uint(min(g.failStreak-1, 8))
+	if backoff > maxFlushBackoff || backoff <= 0 {
+		backoff = maxFlushBackoff
+	}
+	if isQuotaExhausted(err) {
+		backoff = maxFlushBackoff
+		if !g.quotaExhausted {
+			g.quotaExhausted = true
+			log.Printf("[gh-relay] REPO FULL: GitHub rejected the commit because %q is above its size quota. "+
+				"The relay cannot upload or even prune until this is fixed (create a fresh repo, or rotate/reset the "+
+				"existing one) — queued uploads are being dropped to protect memory, and clients will fall back to the "+
+				"DNS media path meanwhile.", g.cfg.Repo)
+		}
+	}
+	g.retryAfter = time.Now().Add(backoff)
+	log.Printf("[gh-relay] flush failed (streak=%d), next attempt in %s", g.failStreak, backoff)
 }
 
 // Has reports whether the file is committed or queued for the next commit.
@@ -256,7 +485,7 @@ func (g *GitHubRelay) Has(size int64, crc uint32) bool {
 	if _, ok := g.known[key]; ok {
 		return true
 	}
-	_, ok := g.pending[key]
+	_, ok := g.ready[key]
 	return ok
 }
 
@@ -279,12 +508,31 @@ func (g *GitHubRelay) Touch(size int64, crc uint32) {
 // cutoff. Selection happens INSIDE commitMu so concurrent prunes from
 // different readers can't pick the same files and race the resulting
 // commits (which used to produce 422 BadObjectState).
-func (g *GitHubRelay) PruneStale(ctx context.Context, cutoff time.Time) (int, error) {
+func (g *GitHubRelay) PruneStale(ctx context.Context, cutoff time.Time) (n int, err error) {
 	if g == nil {
 		return 0, nil
 	}
 	g.commitMu.Lock()
 	defer g.commitMu.Unlock()
+
+	// A failed prune arms the same backoff as a failed flush — otherwise a
+	// quota-exhausted repo retries a huge tree every fetch cycle.
+	defer func() {
+		if err != nil {
+			g.mu.Lock()
+			g.noteFlushFailureLocked(err)
+			g.mu.Unlock()
+		}
+	}()
+
+	// Same backoff gate as flushPending: pruning also needs a commit, so a
+	// quota-exhausted repo rejects it every cycle (17k-file trees each time).
+	g.mu.Lock()
+	if time.Now().Before(g.retryAfter) {
+		g.mu.Unlock()
+		return 0, nil
+	}
+	g.mu.Unlock()
 
 	g.mu.Lock()
 	var entries []treeEntry
@@ -355,8 +603,27 @@ func (g *GitHubRelay) Run(ctx context.Context) {
 	defer tick.Stop()
 	saveTick := time.NewTicker(5 * time.Minute)
 	defer saveTick.Stop()
+	sizeTick := time.NewTicker(30 * time.Minute)
+	defer sizeTick.Stop()
+
+	// Poll once at startup so the first hourly report already has a size.
+	go func() {
+		sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := g.RefreshRepoSize(sctx); err != nil {
+			log.Printf("[gh-relay] repo size: %v", err)
+		}
+	}()
+
 	for {
 		select {
+		case <-sizeTick.C:
+			sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			if err := g.RefreshRepoSize(sctx); err != nil {
+				log.Printf("[gh-relay] repo size: %v", err)
+			}
+			cancel()
+
 		case <-saveTick.C:
 			g.mu.Lock()
 			if g.dirty && g.statePath != "" {
@@ -367,8 +634,10 @@ func (g *GitHubRelay) Run(ctx context.Context) {
 			g.mu.Unlock()
 
 		case <-ctx.Done():
+			// Ignore the backoff gate: this is the last chance to make blobs
+			// already sitting in the repo reachable by a commit.
 			fctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			if err := g.flushPending(fctx); err != nil {
+			if err := g.flushPending(fctx, true); err != nil {
 				log.Printf("[gh-relay] shutdown flush: %v", err)
 			}
 			cancel()
@@ -385,7 +654,7 @@ func (g *GitHubRelay) Run(ctx context.Context) {
 				continue
 			}
 			fctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			if err := g.flushPending(fctx); err != nil {
+			if err := g.flushPending(fctx, false); err != nil {
 				log.Printf("[gh-relay] backstop flush: %v", err)
 			}
 			cancel()
@@ -395,7 +664,7 @@ func (g *GitHubRelay) Run(ctx context.Context) {
 
 func (g *GitHubRelay) queueSize() int {
 	g.mu.Lock()
-	n := len(g.pending)
+	n := len(g.ready)
 	g.mu.Unlock()
 	return n
 }
@@ -406,36 +675,72 @@ func (g *GitHubRelay) Flush(ctx context.Context) error {
 	if g == nil {
 		return nil
 	}
-	return g.flushPending(ctx)
+	return g.flushPending(ctx, false)
 }
 
 // flushPending drains the pending map into a single Git commit via the Git
 // Data API. On any error the batch is re-queued so the next tick retries.
-func (g *GitHubRelay) flushPending(ctx context.Context) error {
+// ignoreBackoff skips the backoff gate; used by the shutdown flush, which is
+// the last chance to make already-uploaded blobs reachable.
+func (g *GitHubRelay) flushPending(ctx context.Context, ignoreBackoff bool) error {
 	g.mu.Lock()
-	if len(g.pending) == 0 {
+	if len(g.ready) == 0 {
 		g.mu.Unlock()
 		return nil
 	}
-	batch := g.pending
-	g.pending = make(map[string]*pendingUpload)
+	// Backoff gate: a quota-exhausted or unreachable remote fails every
+	// attempt, and each attempt rebuilds the whole tree. Wait it out
+	// instead of hammering the API every few minutes.
+	if now := time.Now(); !ignoreBackoff && now.Before(g.retryAfter) {
+		g.mu.Unlock()
+		return nil
+	}
+	batch := g.ready
+	gen := g.readyGen
+	g.ready = make(map[string]*readyObject)
 	g.mu.Unlock()
 
 	if err := g.commitBatch(ctx, batch); err != nil {
-		// Re-queue. A peer goroutine may have queued newer entries with
-		// the same key; prefer those.
 		g.mu.Lock()
-		for k, v := range batch {
-			if _, exists := g.pending[k]; !exists {
-				g.pending[k] = v
-			}
+		// If the remote was recreated mid-flush, every SHA in this batch
+		// points into a repo that no longer exists — re-queuing them would
+		// fail identically forever, and Upload's dedup would block the
+		// re-upload. Drop them instead; the files come back on demand.
+		if gen != g.readyGen {
+			log.Printf("[gh-relay] dropping %d queued object(s): the remote repo was recreated mid-flush", len(batch))
+			g.noteFlushFailureLocked(err)
+			g.mu.Unlock()
+			return err
 		}
+		// Re-queue the SHAs (cheap — no file bytes) so the next tick retries.
+		// A peer goroutine may have queued the same key meanwhile; keep that.
+		dropped := 0
+		for k, v := range batch {
+			if _, exists := g.ready[k]; exists {
+				continue
+			}
+			v.commitFails++
+			if v.commitFails >= maxCommitAttempts {
+				dropped++
+				continue
+			}
+			g.ready[k] = v
+		}
+		if dropped > 0 {
+			log.Printf("[gh-relay] dropping %d queued object(s) after %d failed commit attempts; "+
+				"they will be re-uploaded the next time upstream offers the file", dropped, maxCommitAttempts)
+		}
+		g.noteFlushFailureLocked(err)
 		g.mu.Unlock()
 		return err
 	}
 
 	now := time.Now()
 	g.mu.Lock()
+	g.failStreak = 0
+	g.retryAfter = time.Time{}
+	g.quotaExhausted = false
+	g.lastFlushErr = ""
 	for k, p := range batch {
 		g.known[k] = &ghEntry{size: p.size, crc: p.crc, lastSeen: now}
 	}
@@ -458,19 +763,20 @@ type treeEntry struct {
 	SHA  *string `json:"sha"` // pointer so nil serialises as JSON `null`
 }
 
-// commitBatch performs the Git Data API dance:
+// commitBatch makes already-uploaded blobs reachable:
 //
-//	GET ref → POST blobs → POST tree (with base_tree) → POST commit → PATCH ref.
+//	GET ref → POST tree (with base_tree) → POST commit → PATCH ref.
 //
-// A single commit covers every file in the batch, regardless of count.
-func (g *GitHubRelay) commitBatch(ctx context.Context, batch map[string]*pendingUpload) error {
+// Blobs were pushed by Upload, so this is three calls regardless of how many
+// files the batch references.
+func (g *GitHubRelay) commitBatch(ctx context.Context, batch map[string]*readyObject) error {
 	if len(batch) == 0 {
 		return nil
 	}
 	g.commitMu.Lock()
 	defer g.commitMu.Unlock()
 
-	log.Printf("[gh-relay] starting upload of %d file(s)", len(batch))
+	log.Printf("[gh-relay] committing %d file(s)", len(batch))
 	headSHA, err := g.getRef(ctx, g.branch)
 	if err != nil {
 		return fmt.Errorf("get ref: %w", err)
@@ -482,11 +788,7 @@ func (g *GitHubRelay) commitBatch(ctx context.Context, batch map[string]*pending
 
 	entries := make([]treeEntry, 0, len(batch))
 	for objKey, p := range batch {
-		blobSHA, err := g.createBlob(ctx, p.blob)
-		if err != nil {
-			return fmt.Errorf("create blob %s: %w", objKey, err)
-		}
-		s := blobSHA
+		s := p.sha
 		entries = append(entries, treeEntry{
 			Path: g.domain + "/" + objKey,
 			Mode: "100644",
@@ -588,7 +890,35 @@ func (g *GitHubRelay) bootstrapEmptyRepo(ctx context.Context, branch string) (st
 	if out.Commit.SHA == "" {
 		return "", errors.New("bootstrap: no commit SHA in response")
 	}
+	// First commit means the remote holds no relay objects; if local state
+	// still lists some, the repo was recreated or wiped under us.
+	g.forgetKnownAfterRemoteReset()
 	return out.Commit.SHA, nil
+}
+
+// forgetKnownAfterRemoteReset clears the object index after the remote started
+// over: stale entries make Upload dedup against missing files and PruneStale
+// delete paths that no longer exist. Queued SHAs are dropped for the same
+// reason — those blobs lived in the repo that just disappeared, so committing
+// them would fail forever while Upload's dedup blocked the re-upload.
+func (g *GitHubRelay) forgetKnownAfterRemoteReset() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := len(g.known)
+	// Bump unconditionally: a flush in progress must not re-queue its batch
+	// even when the index happened to be empty.
+	g.readyGen++
+	g.ready = make(map[string]*readyObject)
+	if n == 0 {
+		return
+	}
+	g.known = make(map[string]*ghEntry)
+	g.dirty = true
+	if err := g.saveStateLocked(); err != nil {
+		log.Printf("[gh-relay] save state after remote reset: %v", err)
+	}
+	log.Printf("[gh-relay] remote repo is empty but local state listed %d object(s) — "+
+		"the repo was recreated or wiped, so the index has been reset; files will be re-uploaded on demand", n)
 }
 
 func (g *GitHubRelay) getCommitTree(ctx context.Context, commitSHA string) (string, error) {

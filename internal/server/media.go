@@ -42,25 +42,30 @@ type MediaCache struct {
 
 	// Counters surfaced via Stats(); written with atomics so reads from the
 	// hourly reporter don't have to acquire mu.
-	storeHits      uint64
-	storeMisses    uint64
-	storeRejected  uint64 // file too large
-	queryCount     uint64 // total media block queries served
-	evictionCount  uint64
-	currentEntries int64 // live entry count
-	currentBytes   int64 // sum of file sizes currently cached
+	storeHits       uint64
+	storeMisses     uint64
+	storeRejected   uint64 // file too large
+	queryCount      uint64 // total media block queries served
+	evictionCount   uint64
+	currentEntries  int64 // live entry count
+	currentBytes    int64 // sum of file sizes currently cached (incl. relay-only, which hold no RAM)
+	currentRAMBytes int64 // sum of block bytes actually held in memory
 }
 
 type mediaEntry struct {
-	channel   uint16
-	cacheKey  string   // primary upstream id this entry was first stored under
-	aliases   []string // additional keys (different upstream ids, same content)
-	mimeType  string
-	filename  string
-	tag       string // protocol media tag (MediaImage, MediaFile, ...)
-	size      int64
-	crc32     uint32
-	blocks    [][]byte
+	channel  uint16
+	cacheKey string   // primary upstream id this entry was first stored under
+	aliases  []string // additional keys (different upstream ids, same content)
+	mimeType string
+	filename string
+	tag      string // protocol media tag (MediaImage, MediaFile, ...)
+	size     int64
+	crc32    uint32
+	blocks   [][]byte
+	// ramBytes is what `blocks` actually costs in memory. Zero for
+	// relay-only entries (too big for DNS), which hold no content at all —
+	// so it, not `size`, is the number that tracks real heap usage.
+	ramBytes  int64
 	expiresAt time.Time
 	// inflight prevents the eviction sweep from reaping an entry that is
 	// currently being downloaded by a goroutine that hasn't installed it yet.
@@ -235,6 +240,10 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 	} else {
 		c.logf("media: store key=%s size=%d too big for DNS — relay only", cacheKey, size)
 	}
+	var ramBytes int64
+	for _, b := range blocks {
+		ramBytes += int64(len(b))
+	}
 	entry := &mediaEntry{
 		channel:   channel,
 		cacheKey:  cacheKey,
@@ -244,6 +253,7 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 		size:      size,
 		crc32:     hash,
 		blocks:    blocks,
+		ramBytes:  ramBytes,
 		expiresAt: c.expiry(now),
 	}
 	c.byKey[cacheKey] = entry
@@ -254,6 +264,7 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 	atomic.AddUint64(&c.storeMisses, 1)
 	atomic.AddInt64(&c.currentEntries, 1)
 	atomic.AddInt64(&c.currentBytes, size)
+	atomic.AddInt64(&c.currentRAMBytes, ramBytes)
 	c.logf("media: store tag=%s key=%s ch=%d size=%d blocks=%d", tag, cacheKey, channel, size, len(blocks))
 
 	// Best-effort relay upload. Copy because the caller may reuse the
@@ -341,7 +352,9 @@ func (c *MediaCache) Sweep() int {
 	defer c.mu.Unlock()
 	n := c.sweepExpiredLocked(now)
 	if n > 0 {
-		c.logf("media: sweep evicted=%d remaining=%d", n, len(c.byChannel))
+		// currentEntries, not len(byChannel): relay-only entries have no
+		// channel and would be invisible in that count.
+		c.logf("media: sweep evicted=%d remaining=%d", n, atomic.LoadInt64(&c.currentEntries))
 	}
 	return n
 }
@@ -353,11 +366,24 @@ func (c *MediaCache) sweepExpiredLocked(now time.Time) int {
 	if c.ttl <= 0 {
 		return 0
 	}
+	// Iterate byKey, not byChannel: a file larger than the DNS block cap is
+	// stored relay-only (no channel, blocks==nil), so it never appears in
+	// byChannel. Sweeping byChannel alone left those entries in byKey/byHash
+	// forever — they never expired, currentBytes never came back down, and
+	// the maps grew for the process lifetime.
+	//
+	// byKey holds aliases (several keys → one entry), so dedupe by pointer
+	// before dropping; dropEntryLocked adjusts the counters once per entry.
 	var expired []*mediaEntry
-	for _, entry := range c.byChannel {
+	seen := make(map[*mediaEntry]struct{}, len(c.byKey))
+	for _, entry := range c.byKey {
 		if entry.inflight {
 			continue
 		}
+		if _, dup := seen[entry]; dup {
+			continue
+		}
+		seen[entry] = struct{}{}
 		if now.After(entry.expiresAt) {
 			expired = append(expired, entry)
 		}
@@ -370,15 +396,19 @@ func (c *MediaCache) sweepExpiredLocked(now time.Time) int {
 
 // MediaCacheStats is a snapshot of cache counters.
 type MediaCacheStats struct {
-	Entries        int64  `json:"entries"`
-	Bytes          int64  `json:"bytes"`
-	Queries        uint64 `json:"queries"`
-	StoreHits      uint64 `json:"storeHits"`
-	StoreMisses    uint64 `json:"storeMisses"`
-	StoreRejected  uint64 `json:"storeRejected"`
-	Evictions      uint64 `json:"evictions"`
-	MaxFileBytes   int64  `json:"maxFileBytes"`
-	TTLSeconds     int64  `json:"ttlSeconds"`
+	Entries int64 `json:"entries"`
+	// Bytes is the logical size of cached files, including relay-only ones
+	// whose content is NOT in memory. RAMBytes is the heap actually held —
+	// use that one when diagnosing memory.
+	Bytes         int64  `json:"bytes"`
+	RAMBytes      int64  `json:"ramBytes"`
+	Queries       uint64 `json:"queries"`
+	StoreHits     uint64 `json:"storeHits"`
+	StoreMisses   uint64 `json:"storeMisses"`
+	StoreRejected uint64 `json:"storeRejected"`
+	Evictions     uint64 `json:"evictions"`
+	MaxFileBytes  int64  `json:"maxFileBytes"`
+	TTLSeconds    int64  `json:"ttlSeconds"`
 }
 
 // Stats returns a snapshot of cache counters. Lock-free for the per-counter
@@ -387,6 +417,7 @@ func (c *MediaCache) Stats() MediaCacheStats {
 	return MediaCacheStats{
 		Entries:       atomic.LoadInt64(&c.currentEntries),
 		Bytes:         atomic.LoadInt64(&c.currentBytes),
+		RAMBytes:      atomic.LoadInt64(&c.currentRAMBytes),
 		Queries:       atomic.LoadUint64(&c.queryCount),
 		StoreHits:     atomic.LoadUint64(&c.storeHits),
 		StoreMisses:   atomic.LoadUint64(&c.storeMisses),
@@ -468,6 +499,7 @@ func (c *MediaCache) dropEntryLocked(entry *mediaEntry) {
 	}
 	atomic.AddInt64(&c.currentEntries, -1)
 	atomic.AddInt64(&c.currentBytes, -entry.size)
+	atomic.AddInt64(&c.currentRAMBytes, -entry.ramBytes)
 	atomic.AddUint64(&c.evictionCount, 1)
 }
 

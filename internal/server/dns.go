@@ -1028,6 +1028,9 @@ func (s *DNSServer) emitHourlyReport(rep *hourlyFetchReport, final bool) {
 	if mediaCache := s.feed.MediaCache(); mediaCache != nil {
 		payload["mediaCache"] = mediaCache.Stats()
 	}
+	if st := s.feed.GitHubRelay().Status(); st != nil {
+		payload["ghRelay"] = st
+	}
 	if s.chat != nil {
 		payload["chat"] = s.chat.StatsSnapshot()
 	}

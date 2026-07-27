@@ -36,6 +36,25 @@ func comma(n int64) string {
 	return b.String()
 }
 
+// humanBytes formats a byte count in binary units.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	v := float64(n)
+	i := -1
+	for v >= unit && i < len(units)-1 {
+		v /= unit
+		i++
+	}
+	if v >= 100 {
+		return fmt.Sprintf("%.0f %s", v, units[i])
+	}
+	return fmt.Sprintf("%.1f %s", v, units[i])
+}
+
 func pct(part, total int64) float64 {
 	if total == 0 {
 		return 0
@@ -173,6 +192,37 @@ func renderDashboard(a *aggregate, accounts, top int, live bool) string {
 			}
 		}
 		w("  Chat queries / hr  : %14s   %s(avg over window)%s\n", comma(a.chat/int64(maxInt(a.reports, 1))), cDim, cReset)
+	}
+
+	// ---- media cache + relay health ----
+	if a.lastMedia != nil || a.lastRelay != nil {
+		w("%s\n%sMedia cache & relay%s  %s(latest report)%s\n", line, cBold, cReset, cDim, cReset)
+		if m := a.lastMedia; m != nil {
+			w("  Cached files       : %14s\n", comma(m.Entries))
+			w("  RAM held (DNS)     : %14s   %sblocks served over DNS%s\n",
+				humanBytes(m.RAMBytes), cDim, cReset)
+			w("  Total file bytes   : %14s   %sincl. relay-only, not in RAM%s\n",
+				humanBytes(m.Bytes), cDim, cReset)
+		}
+		if r := a.lastRelay; r != nil && r.Repo != "" {
+			w("  Relay repo         : %14s\n", r.Repo)
+			if r.RepoSizeKB > 0 {
+				w("  Repo size          : %14s   %s%.0f%% of %s budget%s  %s\n",
+					humanBytes(r.RepoSizeKB*1024), cDim, r.PercentUsed,
+					humanBytes(r.QuotaKB*1024), cReset,
+					bar(r.RepoSizeKB, r.QuotaKB, 20))
+			}
+			w("  Awaiting commit    : %14s   %sblobs uploaded, not yet committed%s\n",
+				comma(int64(r.PendingFiles)), cDim, cReset)
+			switch {
+			case r.Quota403:
+				w("  %sStatus             : REPO FULL — recreate the repo; uploads are blocked%s\n", cBold, cReset)
+			case r.FailStreak > 0:
+				w("  Status             : %sfailing (streak %d) %s%s\n", cBold, r.FailStreak, r.LastError, cReset)
+			default:
+				w("  Status             : %14s\n", "ok")
+			}
+		}
 	}
 
 	// ---- time series ----

@@ -62,6 +62,7 @@ func main() {
 	ghBranch := flag.String("github-relay-branch", "main", "Default branch to commit to (e.g. main, master)")
 	ghMaxSizeKB := flag.Int("github-relay-max-size", 15*1024, "Per-file cap for the GitHub relay in KB (0 = no cap)")
 	ghCacheTTLMin := flag.Int("github-relay-ttl", 600, "TTL for GitHub-relay objects in minutes")
+	ghQuotaGB := flag.Int("github-relay-quota-gb", 100, "Relay repo size budget in GB; warns as it fills (GitHub blocks pushes near its own limit)")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	printConfig := flag.Bool("print-config", false, "Print the client config URI (server public key + bootstrap resolvers) and exit")
 	printPubKey := flag.Bool("print-pubkey", false, "Print the server signing public key (sk=) and exit")
@@ -359,6 +360,11 @@ func main() {
 			*ghCacheTTLMin = n
 		}
 	}
+	if env := os.Getenv("THEFEED_GITHUB_RELAY_QUOTA_GB"); env != "" {
+		if n, err := strconv.Atoi(env); err == nil {
+			*ghQuotaGB = n
+		}
+	}
 
 	cfg := server.Config{
 		ListenAddr:          *listen,
@@ -398,6 +404,7 @@ func main() {
 			StatePath:  filepath.Join(*dataDir, "gh_relay_state.json"),
 			MaxBytes:   int64(*ghMaxSizeKB) * 1024,
 			TTLMinutes: *ghCacheTTLMin,
+			QuotaKB:    int64(*ghQuotaGB) * 1024 * 1024,
 		},
 		Telegram: server.TelegramConfig{
 			APIID:       id,

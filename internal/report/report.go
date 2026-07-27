@@ -55,7 +55,32 @@ type hourlyReport struct {
 		Domain  string `json:"domain"`
 		Queries int64  `json:"queries"`
 	} `json:"domains"`
-	ChatStats map[string]int64 `json:"chat"`
+	ChatStats  map[string]int64 `json:"chat"`
+	MediaCache *mediaCacheStats `json:"mediaCache"`
+	GHRelay    *ghRelayStats    `json:"ghRelay"`
+}
+
+// mediaCacheStats mirrors server.MediaCacheStats. Bytes is the logical size of
+// cached files; RAMBytes is the subset actually held in memory (DNS-servable
+// blocks), which is what drives the process's footprint.
+type mediaCacheStats struct {
+	Entries   int64 `json:"entries"`
+	Bytes     int64 `json:"bytes"`
+	RAMBytes  int64 `json:"ramBytes"`
+	Evictions int64 `json:"evictions"`
+}
+
+// ghRelayStats mirrors server.RelayStatus.
+type ghRelayStats struct {
+	Repo         string  `json:"repo"`
+	RepoSizeKB   int64   `json:"repoSizeKB"`
+	QuotaKB      int64   `json:"quotaKB"`
+	PercentUsed  float64 `json:"percentUsed"`
+	PendingFiles int     `json:"pendingFiles"`
+	KnownObjects int     `json:"knownObjects"`
+	Quota403     bool    `json:"quotaExhausted"`
+	FailStreak   int     `json:"failStreak"`
+	LastError    string  `json:"lastError"`
 }
 
 // aggregate accumulates parsed reports.
@@ -73,6 +98,8 @@ type aggregate struct {
 	hours           map[int]int64 // hour-of-day -> total queries
 	series          []int64       // per-report total, in order (for the sparkline)
 	lastChatStats   map[string]int64
+	lastMedia       *mediaCacheStats
+	lastRelay       *ghRelayStats
 	firstTo, lastTo time.Time
 
 	// filterFrom/filterTo (either may be zero) limit which hourly reports are
@@ -136,6 +163,13 @@ func (a *aggregate) add(rep *hourlyReport) {
 				a.lastChatStats[k] += v
 			}
 		}
+	}
+	// Cache/relay figures are gauges, not counters: keep the newest.
+	if rep.MediaCache != nil {
+		a.lastMedia = rep.MediaCache
+	}
+	if rep.GHRelay != nil {
+		a.lastRelay = rep.GHRelay
 	}
 	if terr == nil {
 		a.hours[t.Hour()] += rep.Total

@@ -71,6 +71,7 @@ type GitHubRelayConfig struct {
 	StatePath  string // file used to persist lastSeen across restarts
 	MaxBytes   int64
 	TTLMinutes int
+	QuotaKB    int64 // repo size budget for headroom warnings; 0 = default
 }
 
 func (g GitHubRelayConfig) Active() bool {
