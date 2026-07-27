@@ -52,6 +52,12 @@ const (
 	maxFlushBackoff = 30 * time.Minute
 )
 
+// recoveryProbeEvery is how often a relay parked in an operator-action state
+// (repo full, token not granted) re-checks the remote. Without it the operator
+// fixes the problem and then waits out maxFlushBackoff wondering why nothing
+// happens; with it, uploads resume about a minute later.
+const recoveryProbeEvery = time.Minute
+
 // GitHubRelay uploads encrypted media to a GitHub repo. Domain and object
 // names are HMAC'd; blobs are AES-256-GCM. Uploads are batched into one
 // Git Data API commit per flush.
@@ -78,6 +84,10 @@ type GitHubRelay struct {
 	quotaExhausted bool
 	tokenDenied    bool
 	lastFlushErr   string
+	// lastProbeOK is the previous recovery-probe verdict. Only a false→true
+	// transition clears the backoff, so a remote that reads fine but still
+	// rejects writes doesn't retry (or re-log) every probe.
+	lastProbeOK bool
 
 	// readyGen is bumped whenever every queued SHA becomes invalid (the remote
 	// repo was recreated). A flush that started before the bump must not
@@ -496,6 +506,46 @@ func (g *GitHubRelay) verifyRemoteIndex(ctx context.Context) error {
 	return nil
 }
 
+// probeRecovery clears the backoff as soon as the remote looks usable again,
+// so a re-granted token or a recreated repo resumes in about a minute instead
+// of waiting out maxFlushBackoff. It runs only while parked in a state that
+// needs operator action, and costs one read per probe.
+//
+// Only a false→true transition clears: a remote that is readable but still
+// refuses writes settles back into the normal backoff after one retry instead
+// of hammering the API every probe.
+func (g *GitHubRelay) probeRecovery(ctx context.Context) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	parked := g.quotaExhausted || g.tokenDenied
+	prev := g.lastProbeOK
+	g.mu.Unlock()
+	if !parked {
+		return
+	}
+
+	// RefreshRepoSize is the probe: it fails for a repo we cannot see and
+	// otherwise tells us whether the size problem is gone.
+	healthy := g.RefreshRepoSize(ctx) == nil
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if healthy && g.repoQuotaKB > 0 && g.repoSizeKB >= g.repoQuotaKB {
+		healthy = false // readable, but still over the size budget
+	}
+	g.lastProbeOK = healthy
+	if !healthy || prev {
+		return
+	}
+	g.failStreak = 0
+	g.retryAfter = time.Time{}
+	g.quotaExhausted = false
+	g.tokenDenied = false
+	log.Printf("[gh-relay] %s is reachable again — clearing the backoff and resuming uploads", g.cfg.Repo)
+}
+
 // repoAccessible reports whether the token can currently see the repo.
 func (g *GitHubRelay) repoAccessible(ctx context.Context) (bool, error) {
 	req, err := g.newReq(ctx, http.MethodGet, "/repos/"+g.cfg.Repo, nil)
@@ -697,6 +747,8 @@ func (g *GitHubRelay) Run(ctx context.Context) {
 	defer saveTick.Stop()
 	sizeTick := time.NewTicker(30 * time.Minute)
 	defer sizeTick.Stop()
+	probeTick := time.NewTicker(recoveryProbeEvery)
+	defer probeTick.Stop()
 
 	// At startup: confirm our objects are still on the remote (the repo may
 	// have been recreated while we were down), then poll the size so the
@@ -719,6 +771,11 @@ func (g *GitHubRelay) Run(ctx context.Context) {
 			if err := g.RefreshRepoSize(sctx); err != nil {
 				log.Printf("[gh-relay] repo size: %v", err)
 			}
+			cancel()
+
+		case <-probeTick.C:
+			pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			g.probeRecovery(pctx)
 			cancel()
 
 		case <-saveTick.C:

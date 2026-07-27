@@ -57,20 +57,33 @@ func (f *eagerFake) peakConcurrency() int {
 	return f.peak
 }
 
+// set mutates the fake's knobs safely while the server is serving.
+func (f *eagerFake) set(fn func(*eagerFake)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn(f)
+}
+
 func (f *eagerFake) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Snapshot the knobs under the lock: tests flip them mid-run.
+		f.mu.Lock()
+		blobStatus, blobMessage, treeStatus := f.blobStatus, f.blobMessage, f.treeStatus
+		refEmpty, folderMissing, repoMissing := f.refEmpty, f.folderMissing, f.repoMissing
+		f.mu.Unlock()
+
 		path := r.URL.Path
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/git/blobs"):
 			f.enter()
 			defer f.leave()
 			atomic.AddInt32(&f.blobAttempts, 1)
-			if f.blobStatus != 0 {
-				msg := f.blobMessage
+			if blobStatus != 0 {
+				msg := blobMessage
 				if msg == "" {
 					msg = "Repository is above its size quota."
 				}
-				w.WriteHeader(f.blobStatus)
+				w.WriteHeader(blobStatus)
 				_ = json.NewEncoder(w).Encode(map[string]any{"message": msg})
 				return
 			}
@@ -79,7 +92,7 @@ func (f *eagerFake) handler() http.Handler {
 			_ = json.NewEncoder(w).Encode(map[string]any{"sha": fmt.Sprintf("blobsha%d", n)})
 
 		case r.Method == http.MethodGet && strings.Contains(path, "/git/ref/heads/"):
-			if f.refEmpty {
+			if refEmpty {
 				w.WriteHeader(http.StatusConflict)
 				_, _ = w.Write([]byte(`{"message":"Git Repository is empty."}`))
 				return
@@ -91,7 +104,7 @@ func (f *eagerFake) handler() http.Handler {
 
 		// Repo metadata: used by repoAccessible and RefreshRepoSize.
 		case r.Method == http.MethodGet && strings.HasSuffix(path, "/repos/owner/repo"):
-			if f.repoMissing {
+			if repoMissing {
 				w.WriteHeader(http.StatusNotFound)
 				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
 				return
@@ -100,7 +113,7 @@ func (f *eagerFake) handler() http.Handler {
 
 		// Folder lookup used by verifyRemoteIndex.
 		case r.Method == http.MethodGet && strings.Contains(path, "/contents/"):
-			if f.folderMissing {
+			if folderMissing {
 				w.WriteHeader(http.StatusNotFound)
 				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
 				return
@@ -111,8 +124,8 @@ func (f *eagerFake) handler() http.Handler {
 			_ = json.NewEncoder(w).Encode(map[string]any{"tree": map[string]any{"sha": "basetree"}})
 
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/git/trees"):
-			if f.treeStatus != 0 {
-				w.WriteHeader(f.treeStatus)
+			if treeStatus != 0 {
+				w.WriteHeader(treeStatus)
 				_ = json.NewEncoder(w).Encode(map[string]any{"message": "Repository is above its size quota."})
 				return
 			}
@@ -512,6 +525,104 @@ func TestRelayFlagsTokenAccessDenied(t *testing.T) {
 	}
 	if st := r.Status(); st == nil || !st.TokenDenied {
 		t.Error("Status() must expose tokenDenied so the report can show it")
+	}
+}
+
+// Once the operator fixes the cause (re-grants the token, recreates the repo),
+// the relay must resume in about a probe interval instead of sitting out the
+// full 30-minute backoff.
+func TestRelayProbeClearsBackoffOnceRemoteRecovers(t *testing.T) {
+	f := &eagerFake{
+		blobStatus:  http.StatusForbidden,
+		blobMessage: "Resource not accessible by personal access token",
+		repoMissing: true, // token cannot see the repo yet
+	}
+	r := newEagerRelay(t, f)
+
+	if err := r.Upload(context.Background(), bytes.Repeat([]byte("a"), 2048)); err == nil {
+		t.Fatal("expected the access rejection to surface")
+	}
+	r.mu.Lock()
+	parked := r.tokenDenied && r.retryAfter.After(time.Now())
+	r.mu.Unlock()
+	if !parked {
+		t.Fatal("relay should be parked with tokenDenied and a future retryAfter")
+	}
+
+	// Still broken: the probe must not clear anything.
+	r.probeRecovery(context.Background())
+	r.mu.Lock()
+	stillParked := r.tokenDenied && r.retryAfter.After(time.Now())
+	r.mu.Unlock()
+	if !stillParked {
+		t.Fatal("probe cleared the backoff while the remote was still failing")
+	}
+
+	// Operator re-grants the token / recreates the repo.
+	f.set(func(e *eagerFake) { e.repoMissing = false; e.blobStatus = 0 })
+	r.probeRecovery(context.Background())
+
+	r.mu.Lock()
+	denied, streak, retry := r.tokenDenied, r.failStreak, r.retryAfter
+	r.mu.Unlock()
+	if denied {
+		t.Error("tokenDenied should clear once the remote is reachable again")
+	}
+	if streak != 0 {
+		t.Errorf("failStreak=%d, want 0 after recovery", streak)
+	}
+	if retry.After(time.Now()) {
+		t.Errorf("retryAfter should be cleared, still %s away", time.Until(retry))
+	}
+
+	// And uploads must actually flow again, with no further waiting.
+	if err := r.Upload(context.Background(), bytes.Repeat([]byte("b"), 2048)); err != nil {
+		t.Fatalf("upload after recovery: %v", err)
+	}
+	r.mu.Lock()
+	ready := len(r.ready)
+	r.mu.Unlock()
+	if ready != 1 {
+		t.Fatalf("ready=%d, want 1 — uploads should resume immediately after recovery", ready)
+	}
+}
+
+// A remote that reads fine but keeps refusing writes must not retry on every
+// probe: only a false→true transition clears, so it settles back into backoff.
+func TestRelayProbeDoesNotLoopWhenWritesStillFail(t *testing.T) {
+	f := &eagerFake{
+		blobStatus:  http.StatusForbidden,
+		blobMessage: "Resource not accessible by personal access token",
+		// repoMissing stays false: the repo is readable the whole time.
+	}
+	r := newEagerRelay(t, f)
+
+	if err := r.Upload(context.Background(), bytes.Repeat([]byte("a"), 2048)); err == nil {
+		t.Fatal("expected the access rejection to surface")
+	}
+
+	// First probe sees a readable repo and grants one retry.
+	r.probeRecovery(context.Background())
+	r.mu.Lock()
+	firstCleared := !r.retryAfter.After(time.Now())
+	r.mu.Unlock()
+	if !firstCleared {
+		t.Fatal("first probe should grant one retry when the repo reads fine")
+	}
+
+	// The retry fails again and re-arms the backoff.
+	if err := r.Upload(context.Background(), bytes.Repeat([]byte("c"), 2048)); err == nil {
+		t.Fatal("expected the write to fail again")
+	}
+	// Further probes must NOT keep clearing it.
+	for i := 0; i < 3; i++ {
+		r.probeRecovery(context.Background())
+	}
+	r.mu.Lock()
+	retry := r.retryAfter
+	r.mu.Unlock()
+	if !retry.After(time.Now()) {
+		t.Error("repeated probes cleared the backoff again; a still-failing write must stay parked")
 	}
 }
 
