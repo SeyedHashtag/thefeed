@@ -28,10 +28,11 @@ type eagerFake struct {
 	inFlight int
 	peak     int
 
-	blobStatus  int    // when non-zero, blob creation fails with this status
-	blobMessage string // error message for a failed blob; defaults to the quota rejection
-	treeStatus  int    // when non-zero, tree creation fails with this status
-	refEmpty    bool   // when true, getRef reports an empty repository
+	blobStatus    int    // when non-zero, blob creation fails with this status
+	blobMessage   string // error message for a failed blob; defaults to the quota rejection
+	treeStatus    int    // when non-zero, tree creation fails with this status
+	refEmpty      bool   // when true, getRef reports an empty repository
+	folderMissing bool   // when true, the relay's folder 404s (repo recreated)
 }
 
 func (f *eagerFake) enter() {
@@ -86,6 +87,15 @@ func (f *eagerFake) handler() http.Handler {
 
 		case r.Method == http.MethodPut && strings.Contains(path, "/contents/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"commit": map[string]any{"sha": "bootstrapsha"}})
+
+		// Folder lookup used by verifyRemoteIndex.
+		case r.Method == http.MethodGet && strings.Contains(path, "/contents/"):
+			if f.folderMissing {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"path": "x", "type": "file"}})
 
 		case r.Method == http.MethodGet && strings.Contains(path, "/git/commits/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"tree": map[string]any{"sha": "basetree"}})
@@ -408,6 +418,49 @@ func TestRelayForgetsKnownAfterRemoteReset(t *testing.T) {
 	r.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("known=%d after remote reset, want 0", n)
+	}
+}
+
+// Recreating the repo *with* a README leaves it non-empty, so the empty-repo
+// bootstrap never runs. The index must still be reset — detected by the relay's
+// folder being absent — or Upload dedups against files that no longer exist.
+func TestRelayResetsIndexWhenFolderMissingOnNonEmptyRepo(t *testing.T) {
+	f := &eagerFake{folderMissing: true} // repo exists (README) but our folder doesn't
+	r := newEagerRelay(t, f)
+
+	r.mu.Lock()
+	r.known["ghost-1"] = &ghEntry{size: 10, crc: 1, lastSeen: time.Now()}
+	r.known["ghost-2"] = &ghEntry{size: 20, crc: 2, lastSeen: time.Now()}
+	r.mu.Unlock()
+
+	if err := r.verifyRemoteIndex(context.Background()); err != nil {
+		t.Fatalf("verifyRemoteIndex: %v", err)
+	}
+	r.mu.Lock()
+	n := len(r.known)
+	r.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("known=%d after the folder vanished, want 0", n)
+	}
+}
+
+// The converse: a healthy repo whose folder is present must keep its index.
+func TestRelayKeepsIndexWhenFolderPresent(t *testing.T) {
+	f := &eagerFake{}
+	r := newEagerRelay(t, f)
+
+	r.mu.Lock()
+	r.known["real-1"] = &ghEntry{size: 10, crc: 1, lastSeen: time.Now()}
+	r.mu.Unlock()
+
+	if err := r.verifyRemoteIndex(context.Background()); err != nil {
+		t.Fatalf("verifyRemoteIndex: %v", err)
+	}
+	r.mu.Lock()
+	n := len(r.known)
+	r.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("known=%d, want 1 — a present folder must not reset the index", n)
 	}
 }
 

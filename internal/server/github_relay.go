@@ -443,6 +443,42 @@ func (g *GitHubRelay) RefreshRepoSize(ctx context.Context) error {
 	return nil
 }
 
+// verifyRemoteIndex drops the object index when this server's folder is gone
+// from the remote. bootstrapEmptyRepo only fires for an empty repo or a missing
+// branch, so a repo recreated *with* a README (non-empty, same branch) would
+// otherwise keep a stale index: Upload would dedup against files that no longer
+// exist and clients would never receive them. Only a definitive 404 resets;
+// transport errors leave the index alone.
+func (g *GitHubRelay) verifyRemoteIndex(ctx context.Context) error {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	n := len(g.known)
+	g.mu.Unlock()
+	if n == 0 {
+		return nil
+	}
+	req, err := g.newReq(ctx, http.MethodGet,
+		"/repos/"+g.cfg.Repo+"/contents/"+g.domain+"?ref="+g.branch, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		g.forgetKnownAfterRemoteReset()
+		return nil
+	}
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("verify relay folder: %s — %s", resp.Status, ghErrorBody(resp))
+	}
+	return nil
+}
+
 // isQuotaExhausted reports GitHub's "above its size quota" rejection, which
 // needs a manual repo recreate and never clears on its own.
 func isQuotaExhausted(err error) bool {
@@ -606,10 +642,15 @@ func (g *GitHubRelay) Run(ctx context.Context) {
 	sizeTick := time.NewTicker(30 * time.Minute)
 	defer sizeTick.Stop()
 
-	// Poll once at startup so the first hourly report already has a size.
+	// At startup: confirm our objects are still on the remote (the repo may
+	// have been recreated while we were down), then poll the size so the
+	// first hourly report already has one.
 	go func() {
 		sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
+		if err := g.verifyRemoteIndex(sctx); err != nil {
+			log.Printf("[gh-relay] verify remote index: %v", err)
+		}
 		if err := g.RefreshRepoSize(sctx); err != nil {
 			log.Printf("[gh-relay] repo size: %v", err)
 		}
@@ -917,7 +958,7 @@ func (g *GitHubRelay) forgetKnownAfterRemoteReset() {
 	if err := g.saveStateLocked(); err != nil {
 		log.Printf("[gh-relay] save state after remote reset: %v", err)
 	}
-	log.Printf("[gh-relay] remote repo is empty but local state listed %d object(s) — "+
+	log.Printf("[gh-relay] remote no longer holds our objects but local state listed %d — "+
 		"the repo was recreated or wiped, so the index has been reset; files will be re-uploaded on demand", n)
 }
 

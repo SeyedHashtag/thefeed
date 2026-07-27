@@ -281,9 +281,10 @@ What the server does for you:
   growing in memory until the process is OOM-killed.
 
 What you have to do when it fills up: **delete the repo on GitHub and create it
-again with the same name.** The server detects the empty repo, resets its object
-index, and re-uploads on demand — no manual state cleanup needed. Media stays
-available over DNS while the relay is empty.
+again with the same name.** Ticking "Add a README" is fine — the server notices
+its own folder is gone either way, resets its object index, and re-uploads on
+demand, so no manual state cleanup is needed. Media stays available over DNS
+while the relay is empty.
 
 Use **one repo per server**. Two servers can share one safely (paths are
 namespaced by an HMAC of the domain, and neither can delete the other's files),
