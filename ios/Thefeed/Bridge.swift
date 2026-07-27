@@ -80,9 +80,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             saveVideo(at: url)
             return
         }
-        // Fallback for non-media (PDFs, archives, etc.) — share sheet so
-        // the user picks Files / a third-party app.
-        present(url: url, save: false)
+        // Non-media (backups, PDFs, archives): a document picker, so the user
+        // gets a real "Save to Files" on both iOS and macOS.
+        present(url: url, save: true)
     }
 
     private func share(_ body: [String: Any]) {
@@ -202,10 +202,23 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             // UIApplication.connectedScenes is empty — find the key window
             // directly and walk to the top-most presented controller.
             guard let top = Self.topViewController() else { return }
-            let vc = UIActivityViewController(
-                activityItems: [url],
-                applicationActivities: nil
-            )
+            let vc: UIViewController
+            if save {
+                // A save must offer "Save to Files". The share sheet does not
+                // when this app runs on macOS (it lists only Shortcuts), which
+                // left backups impossible to save there, so exports use the
+                // document picker instead.
+                if #available(iOS 14.0, *) {
+                    vc = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+                } else {
+                    vc = UIDocumentPickerViewController(url: url, in: .exportToService)
+                }
+            } else {
+                vc = UIActivityViewController(
+                    activityItems: [url],
+                    applicationActivities: nil
+                )
+            }
             // iPad popover anchor.
             vc.popoverPresentationController?.sourceView = self?.webView
             top.present(vc, animated: true)

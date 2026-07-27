@@ -231,6 +231,145 @@ class AndroidBridge(private val activity: Activity) {
         }
     }
 
+    // ── Streaming download (app updates) ─────────────────────────────────
+    // The web UI used to pull the whole APK into JS memory and hand it over
+    // as base64. That peaked around 8x the file size — roughly 210 MB for the
+    // 25 MB universal APK, counting the JS chunks, the Blob, the UTF-16
+    // base64 string, its copy across the JNI boundary and the decoded bytes —
+    // which is enough to push a low-RAM device into system-wide thrashing.
+    // Streaming straight to Downloads here keeps memory flat at one buffer.
+    // JS starts the transfer and then polls downloadStatus().
+
+    private val dlLock = Any()
+    private var dlState = "idle" // idle | running | done | error
+    private var dlReceived = 0L
+    private var dlTotal = 0L
+    private var dlDetail = "" // saved name on success, message on error
+
+    /** Starts a background download of url into Downloads/. Returns false if
+     *  it could not be started (storage permission still pending). */
+    @JavascriptInterface
+    fun startDownload(url: String, filename: String): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && !hasLegacyStoragePermission()) {
+            requestLegacyStoragePermission()
+            toast("Storage permission needed — please tap Update again")
+            return false
+        }
+        synchronized(dlLock) {
+            if (dlState == "running") return true // already in flight
+            dlState = "running"
+            dlReceived = 0L
+            dlTotal = 0L
+            dlDetail = ""
+        }
+        val safe = sanitiseFilename(filename)
+        Thread({ runDownload(url, safe) }, "thefeed-download").apply {
+            isDaemon = true
+            start()
+        }
+        return true
+    }
+
+    /** Progress for the JS poller: {"state","received","total","detail"}. */
+    @JavascriptInterface
+    fun downloadStatus(): String = synchronized(dlLock) {
+        "{\"state\":\"$dlState\",\"received\":$dlReceived," +
+            "\"total\":$dlTotal,\"detail\":\"${jsonEscape(dlDetail)}\"}"
+    }
+
+    private fun finishDownload(state: String, detail: String) {
+        synchronized(dlLock) {
+            dlState = state
+            dlDetail = detail
+        }
+    }
+
+    private fun runDownload(url: String, safe: String) {
+        val resolver = activity.contentResolver
+        var target: Uri? = null
+        try {
+            val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 30_000
+                readTimeout = 60_000
+                instanceFollowRedirects = true
+            }
+            try {
+                if (conn.responseCode / 100 != 2) throw java.io.IOException("HTTP ${conn.responseCode}")
+                val len = conn.contentLengthLong
+                synchronized(dlLock) { dlTotal = if (len > 0) len else 0L }
+
+                val out: java.io.OutputStream
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, safe)
+                        put(MediaStore.MediaColumns.MIME_TYPE, mimeFromFilename(safe, "application/octet-stream"))
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                    target = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        ?: throw java.io.IOException("no Downloads URI")
+                    out = resolver.openOutputStream(target)
+                        ?: throw java.io.IOException("cannot open Downloads")
+                } else {
+                    @Suppress("DEPRECATION")
+                    val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                    if (!dir.exists()) dir.mkdirs()
+                    out = FileOutputStream(File(dir, safe))
+                }
+
+                conn.inputStream.use { input ->
+                    out.use { os ->
+                        val buf = ByteArray(64 * 1024)
+                        var got = 0L
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            os.write(buf, 0, n)
+                            got += n
+                            synchronized(dlLock) { dlReceived = got }
+                        }
+                        os.flush()
+                    }
+                }
+            } finally {
+                conn.disconnect()
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && target != null) {
+                resolver.update(
+                    target,
+                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                    null, null
+                )
+            }
+            finishDownload("done", safe)
+            toast("Saved to Downloads/$safe")
+        } catch (e: Exception) {
+            Log.e(TAG, "startDownload failed", e)
+            // Drop the half-written pending entry so Downloads isn't littered.
+            if (target != null) {
+                try { resolver.delete(target, null, null) } catch (ignored: Exception) { }
+            }
+            finishDownload("error", e.message ?: "download failed")
+        }
+    }
+
+    private fun jsonEscape(s: String): String {
+        val sb = StringBuilder(s.length + 8)
+        for (c in s) {
+            when {
+                c == '"' -> sb.append("\\\"")
+                c == '\\' -> sb.append("\\\\")
+                c == '\n' -> sb.append("\\n")
+                c == '\r' -> sb.append("\\r")
+                c == '\t' -> sb.append("\\t")
+                c < ' ' -> sb.append(String.format("\\u%04x", c.code))
+                else -> sb.append(c)
+            }
+        }
+        return sb.toString()
+    }
+
     private fun hasLegacyStoragePermission(): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return true
         return ContextCompat.checkSelfPermission(

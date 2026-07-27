@@ -490,6 +490,56 @@ async function runUpdateDownload(newVersion, overlay) {
     return (n / 1024 / 1024).toFixed(2) + ' MB';
   };
 
+  // Android: let the native side stream the APK straight to Downloads.
+  // Buffering it in JS and handing it over as base64 peaked at ~8x the file
+  // size (~210 MB for the 25 MB universal APK), which could freeze low-RAM
+  // devices. The native path holds one 64 KB buffer; we just poll progress.
+  if (androidBridge && androidBridge.startDownload && androidBridge.downloadStatus) {
+    var updURL = location.origin + '/api/update/download?version=' + encodeURIComponent(newVersion);
+    var updName = 'thefeed-' + newVersion + '.apk';
+    if (!androidBridge.startDownload(updURL, updName)) {
+      if (txt) txt.textContent = t('update_download_failed') || 'Download failed';
+      return;
+    }
+    var poll = setInterval(function () {
+      var st;
+      try { st = JSON.parse(androidBridge.downloadStatus() || '{}'); } catch (e) { return; }
+      if (st.state === 'running') {
+        if (st.total > 0) {
+          var p = Math.min(100, (st.received / st.total) * 100);
+          if (bar) bar.style.width = p.toFixed(1) + '%';
+          if (txt) txt.textContent = fmtBytes(st.received) + ' / ' + fmtBytes(st.total) + ' (' + p.toFixed(0) + '%)';
+        } else if (txt) {
+          txt.textContent = fmtBytes(st.received || 0);
+        }
+        return;
+      }
+      clearInterval(poll);
+      if (st.state === 'done') {
+        if (bar) bar.style.width = '100%';
+        if (txt) txt.textContent = (t('update_saved') || 'Saved') + ': ' + (st.detail || updName);
+        try { localStorage.setItem('thefeed_skip_gh_update_' + normalizeVersion(newVersion), '1'); } catch (e) { }
+        fetch('/api/settings', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ skipUpdateVersion: newVersion })
+        }).catch(function () { });
+        setTimeout(function () {
+          if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        }, 1500);
+      } else if (st.state === 'error') {
+        if (txt) {
+          txt.style.color = 'var(--danger,#e53935)';
+          txt.textContent = (t('update_download_failed') || 'Download failed') + ': ' + (st.detail || '');
+        }
+      }
+    }, 300);
+    document.getElementById('updateCancel').onclick = function () {
+      clearInterval(poll);
+      if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    };
+    return;
+  }
+
   try {
     var resp = await fetch('/api/update/download?version=' + encodeURIComponent(newVersion), {
       signal: controller.signal,
@@ -730,7 +780,10 @@ function doBackupExport() {
     return r.blob();
   }).then(function (blob) {
     triggerDownload(blob, 'thefeed-backup.tfbak');
-    if (!(window.Android && window.Android.saveMedia)) {
+    // Native bridges finish the save themselves (Downloads toast on Android,
+    // a Save-to-Files picker on iOS/macOS), so claiming success here would be
+    // premature — and wrong if the user cancels the picker.
+    if (!(window.Android || window.IOS)) {
       showToast(t('backup_exported') || 'Backup exported');
     }
   }).catch(function (e) {

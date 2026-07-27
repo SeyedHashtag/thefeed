@@ -568,8 +568,12 @@ function triggerDownload(blob, filename) {
     }
     if (ext) filename += ext;
   }
-  // Android bridge: reliable save to Downloads with a toast showing the path.
-  var bridge = (typeof window !== 'undefined' && window.Android) ? window.Android : null;
+  // Native bridge (Android AND iOS): a real save that needs no user gesture.
+  // navigator.share is deliberately not used: it requires transient user
+  // activation, which has expired by the time the blob's fetch resolves, so it
+  // silently saved nothing — and when the iOS app runs on macOS its share
+  // sheet has no "save" entry at all.
+  var bridge = (typeof window !== 'undefined') ? (window.Android || window.IOS) : null;
   if (bridge && typeof bridge.saveMedia === 'function') {
     var reader = new FileReader();
     reader.onload = function () {
@@ -580,16 +584,11 @@ function triggerDownload(blob, filename) {
     reader.readAsDataURL(blob);
     return;
   }
-  // iOS WKWebView: <a download> is ignored, use Web Share API instead.
-  if (navigator.share && navigator.canShare) {
-    try {
-      var file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
-      if (navigator.canShare({ files: [file] })) {
-        navigator.share({ files: [file] }).catch(function () {});
-        return;
-      }
-    } catch (e) {}
-  }
+  // Every desktop browser handles this natively.
+  anchorDownload(blob, filename);
+}
+
+function anchorDownload(blob, filename) {
   var a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = filename;

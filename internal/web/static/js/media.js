@@ -1159,20 +1159,12 @@ async function mediaSave(msgID) {
   var card = document.getElementById('media-' + msgID);
   var tag = card ? card.getAttribute('data-tag') : '';
   var fname = mediaFilenameFor(msgID, tag, entry.mime);
-  if (androidBridge && androidBridge.saveMedia) {
-    try {
-      var b64 = await blobToBase64(entry.blob);
-      androidBridge.saveMedia(b64, entry.mime || 'application/octet-stream', fname);
-    } catch (e) { }
-    return;
-  }
-  var a = document.createElement('a');
-  a.href = entry.url;
-  a.download = fname;
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  // Use the shared saver: it routes through the native bridge on Android AND
+  // iOS. This used to check only window.Android, so on iOS it fell through to
+  // <a download> with a blob: URL — which iOS ignores, then fails to open
+  // ("LSApplicationWorkspace ... blob:http://127.0.0.1"), so the feed's save
+  // button did nothing.
+  triggerDownload(entry.blob, fname);
 }
 
 async function mediaShare(msgID) {
