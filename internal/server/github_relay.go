@@ -324,6 +324,20 @@ func (g *GitHubRelay) Upload(ctx context.Context, body []byte) error {
 		return fmt.Errorf("encrypt relay blob: %w", err)
 	}
 	sha, err := g.createBlob(ctx, blob)
+	if isRepoEmpty(err) {
+		// The Git Data API refuses to create objects in a repo with no
+		// commits, and we upload blobs before any commit — so a freshly
+		// created (empty) repo would reject every blob forever, leaving
+		// nothing queued and nothing to trigger the bootstrap. Bootstrap via
+		// getRef, then retry the blob once. commitMu keeps concurrent uploads
+		// from racing to create the first commit.
+		g.commitMu.Lock()
+		_, bootErr := g.getRef(ctx, g.branch)
+		g.commitMu.Unlock()
+		if bootErr == nil {
+			sha, err = g.createBlob(ctx, blob)
+		}
+	}
 	<-g.uploadSem
 	if err != nil {
 		// Only failures that need operator action (size quota, revoked token
@@ -592,6 +606,13 @@ func (g *GitHubRelay) repoAccessible(ctx context.Context) (bool, error) {
 // the repo at all gets 404 instead — see verifyRemoteIndex.)
 func isTokenAccessDenied(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "not accessible by personal access token")
+}
+
+// isRepoEmpty reports GitHub's 409 "Git Repository is empty": the Git Data API
+// will not create objects until the repo has a first commit. Self-healing —
+// see the bootstrap retry in Upload.
+func isRepoEmpty(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "repository is empty")
 }
 
 // isQuotaExhausted reports GitHub's "above its size quota" rejection, which

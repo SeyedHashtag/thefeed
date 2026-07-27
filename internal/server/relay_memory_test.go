@@ -34,6 +34,8 @@ type eagerFake struct {
 	refEmpty      bool   // when true, getRef reports an empty repository
 	folderMissing bool   // when true, the relay's folder 404s (repo recreated)
 	repoMissing   bool   // when true, the repo itself 404s (deleted, or token lost access)
+	repoEmpty     bool   // when true, the repo has no commits: blobs 409 until bootstrapped
+	bootstraps    int32  // PUT /contents/.gitkeep calls
 }
 
 func (f *eagerFake) enter() {
@@ -70,6 +72,7 @@ func (f *eagerFake) handler() http.Handler {
 		f.mu.Lock()
 		blobStatus, blobMessage, treeStatus := f.blobStatus, f.blobMessage, f.treeStatus
 		refEmpty, folderMissing, repoMissing := f.refEmpty, f.folderMissing, f.repoMissing
+		repoEmpty := f.repoEmpty
 		f.mu.Unlock()
 
 		path := r.URL.Path
@@ -78,6 +81,11 @@ func (f *eagerFake) handler() http.Handler {
 			f.enter()
 			defer f.leave()
 			atomic.AddInt32(&f.blobAttempts, 1)
+			if repoEmpty {
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{"message": "Git Repository is empty."})
+				return
+			}
 			if blobStatus != 0 {
 				msg := blobMessage
 				if msg == "" {
@@ -92,7 +100,7 @@ func (f *eagerFake) handler() http.Handler {
 			_ = json.NewEncoder(w).Encode(map[string]any{"sha": fmt.Sprintf("blobsha%d", n)})
 
 		case r.Method == http.MethodGet && strings.Contains(path, "/git/ref/heads/"):
-			if refEmpty {
+			if refEmpty || repoEmpty {
 				w.WriteHeader(http.StatusConflict)
 				_, _ = w.Write([]byte(`{"message":"Git Repository is empty."}`))
 				return
@@ -100,6 +108,8 @@ func (f *eagerFake) handler() http.Handler {
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": map[string]any{"sha": "headsha"}})
 
 		case r.Method == http.MethodPut && strings.Contains(path, "/contents/"):
+			atomic.AddInt32(&f.bootstraps, 1)
+			f.set(func(e *eagerFake) { e.repoEmpty = false }) // first commit exists now
 			_ = json.NewEncoder(w).Encode(map[string]any{"commit": map[string]any{"sha": "bootstrapsha"}})
 
 		// Repo metadata: used by repoAccessible and RefreshRepoSize.
@@ -679,6 +689,40 @@ func TestRelaySuccessfulUploadClearsLastError(t *testing.T) {
 	}
 	if got := r.Status().LastError; got != "" {
 		t.Errorf("LastError=%q, want cleared after a successful upload", got)
+	}
+}
+
+// A repo recreated WITHOUT a README has no commits, and the Git Data API
+// rejects blob creation with 409 "Git Repository is empty". Since blobs are
+// uploaded before any commit, nothing would ever be queued to trigger the
+// bootstrap — the relay would deadlock. Upload must bootstrap and retry.
+func TestRelayBootstrapsEmptyRepoOnFirstUpload(t *testing.T) {
+	f := &eagerFake{repoEmpty: true}
+	r := newEagerRelay(t, f)
+
+	if err := r.Upload(context.Background(), bytes.Repeat([]byte("a"), 2048)); err != nil {
+		t.Fatalf("upload into an empty repo must self-heal, got: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&f.bootstraps); got != 1 {
+		t.Errorf("bootstrap commits=%d, want 1", got)
+	}
+	if got := atomic.LoadInt32(&f.blobs); got != 1 {
+		t.Errorf("stored blobs=%d, want 1 after the retry", got)
+	}
+	r.mu.Lock()
+	ready := len(r.ready)
+	r.mu.Unlock()
+	if ready != 1 {
+		t.Fatalf("ready=%d, want 1 — the retried blob must be queued", ready)
+	}
+
+	// And the queue must go on to commit normally.
+	if err := r.Flush(context.Background()); err != nil {
+		t.Fatalf("flush after bootstrap: %v", err)
+	}
+	if got := atomic.LoadInt32(&f.commits); got != 1 {
+		t.Errorf("commits=%d, want 1", got)
 	}
 }
 
