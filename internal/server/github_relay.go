@@ -76,6 +76,7 @@ type GitHubRelay struct {
 	failStreak     int
 	retryAfter     time.Time
 	quotaExhausted bool
+	tokenDenied    bool
 	lastFlushErr   string
 
 	// readyGen is bumped whenever every queued SHA becomes invalid (the remote
@@ -308,12 +309,13 @@ func (g *GitHubRelay) Upload(ctx context.Context, body []byte) error {
 	sha, err := g.createBlob(ctx, blob)
 	<-g.uploadSem
 	if err != nil {
-		// Only a size-quota rejection arms the global backoff. Arming it for
-		// any transient error (a 502, a timeout on one large file) would make
-		// Upload silently drop every file for the next 1–30 minutes — and
-		// relay-only files, which are too big for DNS, have no fallback.
+		// Only failures that need operator action (size quota, revoked token
+		// grant) arm the global backoff. Arming it for a transient error (a
+		// 502, a timeout on one large file) would make Upload silently drop
+		// every file for the next 1–30 minutes — and relay-only files, which
+		// are too big for DNS, have no fallback.
 		g.mu.Lock()
-		if isQuotaExhausted(err) {
+		if isQuotaExhausted(err) || isTokenAccessDenied(err) {
 			g.noteFlushFailureLocked(err)
 		} else {
 			g.lastFlushErr = trimErrBody(err.Error())
@@ -352,6 +354,7 @@ type RelayStatus struct {
 	PendingFiles int     `json:"pendingFiles"`
 	KnownObjects int     `json:"knownObjects"`
 	Quota403     bool    `json:"quotaExhausted"`
+	TokenDenied  bool    `json:"tokenDenied"`
 	FailStreak   int     `json:"failStreak"`
 	LastError    string  `json:"lastError,omitempty"`
 }
@@ -380,6 +383,7 @@ func (g *GitHubRelay) Status() *RelayStatus {
 		PendingFiles: len(g.ready),
 		KnownObjects: len(g.known),
 		Quota403:     g.quotaExhausted,
+		TokenDenied:  g.tokenDenied,
 		FailStreak:   g.failStreak,
 		LastError:    g.lastFlushErr,
 	}
@@ -470,6 +474,19 @@ func (g *GitHubRelay) verifyRemoteIndex(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
+		// GitHub answers 404 (not 403) for a repo the token cannot see, so a
+		// missing folder and a token that lost access are indistinguishable
+		// here. Ask about the repo itself before discarding the index.
+		ok, err := g.repoAccessible(ctx)
+		if err != nil {
+			return fmt.Errorf("verify relay folder: %w", err)
+		}
+		if !ok {
+			return fmt.Errorf("cannot see repo %q: it was deleted, renamed, or the token no longer grants "+
+				"access to it. A fine-grained token is scoped to a repository ID, so recreating a repo with the "+
+				"same name revokes access — re-grant this repo in the token settings (classic ghp_ tokens are "+
+				"unaffected). Keeping the object index until access returns", g.cfg.Repo)
+		}
 		g.forgetKnownAfterRemoteReset()
 		return nil
 	}
@@ -477,6 +494,35 @@ func (g *GitHubRelay) verifyRemoteIndex(ctx context.Context) error {
 		return fmt.Errorf("verify relay folder: %s — %s", resp.Status, ghErrorBody(resp))
 	}
 	return nil
+}
+
+// repoAccessible reports whether the token can currently see the repo.
+func (g *GitHubRelay) repoAccessible(ctx context.Context) (bool, error) {
+	req, err := g.newReq(ctx, http.MethodGet, "/repos/"+g.cfg.Repo, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.StatusCode/100 != 2 {
+		return false, fmt.Errorf("repo lookup: %s — %s", resp.Status, ghErrorBody(resp))
+	}
+	return true, nil
+}
+
+// isTokenAccessDenied reports GitHub's "resource not accessible by personal
+// access token" rejection: the token authenticates but is not granted this
+// repo. A fine-grained token is scoped to a repository ID, so recreating a repo
+// revokes the grant even though the name is unchanged. (A token that cannot see
+// the repo at all gets 404 instead — see verifyRemoteIndex.)
+func isTokenAccessDenied(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "not accessible by personal access token")
 }
 
 // isQuotaExhausted reports GitHub's "above its size quota" rejection, which
@@ -504,6 +550,16 @@ func (g *GitHubRelay) noteFlushFailureLocked(err error) {
 				"The relay cannot upload or even prune until this is fixed (create a fresh repo, or rotate/reset the "+
 				"existing one) — queued uploads are being dropped to protect memory, and clients will fall back to the "+
 				"DNS media path meanwhile.", g.cfg.Repo)
+		}
+	}
+	if isTokenAccessDenied(err) {
+		backoff = maxFlushBackoff
+		if !g.tokenDenied {
+			g.tokenDenied = true
+			log.Printf("[gh-relay] TOKEN CANNOT WRITE %q: GitHub says the resource is not accessible by this personal "+
+				"access token. A fine-grained token is bound to a repository ID, so recreating the repo revokes its grant "+
+				"even though the name is unchanged — open the token settings and give this repository Contents: "+
+				"read and write again. Media keeps flowing over DNS until then.", g.cfg.Repo)
 		}
 	}
 	g.retryAfter = time.Now().Add(backoff)
@@ -781,6 +837,7 @@ func (g *GitHubRelay) flushPending(ctx context.Context, ignoreBackoff bool) erro
 	g.failStreak = 0
 	g.retryAfter = time.Time{}
 	g.quotaExhausted = false
+	g.tokenDenied = false
 	g.lastFlushErr = ""
 	for k, p := range batch {
 		g.known[k] = &ghEntry{size: p.size, crc: p.crc, lastSeen: now}

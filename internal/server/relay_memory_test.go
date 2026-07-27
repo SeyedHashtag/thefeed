@@ -33,6 +33,7 @@ type eagerFake struct {
 	treeStatus    int    // when non-zero, tree creation fails with this status
 	refEmpty      bool   // when true, getRef reports an empty repository
 	folderMissing bool   // when true, the relay's folder 404s (repo recreated)
+	repoMissing   bool   // when true, the repo itself 404s (deleted, or token lost access)
 }
 
 func (f *eagerFake) enter() {
@@ -87,6 +88,15 @@ func (f *eagerFake) handler() http.Handler {
 
 		case r.Method == http.MethodPut && strings.Contains(path, "/contents/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"commit": map[string]any{"sha": "bootstrapsha"}})
+
+		// Repo metadata: used by repoAccessible and RefreshRepoSize.
+		case r.Method == http.MethodGet && strings.HasSuffix(path, "/repos/owner/repo"):
+			if f.repoMissing {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"size": 1024})
 
 		// Folder lookup used by verifyRemoteIndex.
 		case r.Method == http.MethodGet && strings.Contains(path, "/contents/"):
@@ -441,6 +451,67 @@ func TestRelayResetsIndexWhenFolderMissingOnNonEmptyRepo(t *testing.T) {
 	r.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("known=%d after the folder vanished, want 0", n)
+	}
+}
+
+// A fine-grained token is scoped to a repository ID, so recreating a repo with
+// the same name revokes access and every call 404s — indistinguishable from a
+// missing folder. The index must be KEPT in that case (we cannot see the repo,
+// so we cannot conclude our files are gone), and the error must say why.
+func TestRelayKeepsIndexWhenRepoInaccessible(t *testing.T) {
+	f := &eagerFake{folderMissing: true, repoMissing: true}
+	r := newEagerRelay(t, f)
+
+	r.mu.Lock()
+	r.known["real-1"] = &ghEntry{size: 10, crc: 1, lastSeen: time.Now()}
+	r.mu.Unlock()
+
+	err := r.verifyRemoteIndex(context.Background())
+	if err == nil {
+		t.Fatal("an inaccessible repo must surface an error, not be treated as an empty folder")
+	}
+	if !strings.Contains(err.Error(), "token") {
+		t.Errorf("error should point at the token/access cause, got: %v", err)
+	}
+	r.mu.Lock()
+	n := len(r.known)
+	r.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("known=%d — the index must survive an access failure", n)
+	}
+}
+
+// Observed in production after recreating the repo: GitHub answers writes with
+// 403 "Resource not accessible by personal access token" because a fine-grained
+// token is bound to the old repository ID. That needs operator action, so it
+// must flag tokenDenied and back off fully rather than retry every cycle.
+func TestRelayFlagsTokenAccessDenied(t *testing.T) {
+	f := &eagerFake{
+		blobStatus:  http.StatusForbidden,
+		blobMessage: "Resource not accessible by personal access token",
+	}
+	r := newEagerRelay(t, f)
+
+	if err := r.Upload(context.Background(), bytes.Repeat([]byte("a"), 2048)); err == nil {
+		t.Fatal("expected the access rejection to surface")
+	}
+
+	r.mu.Lock()
+	denied, quota, retry := r.tokenDenied, r.quotaExhausted, r.retryAfter
+	r.mu.Unlock()
+
+	if !denied {
+		t.Error("tokenDenied should be set for 'not accessible by personal access token'")
+	}
+	if quota {
+		t.Error("this is an access failure, not a size-quota failure")
+	}
+	if time.Until(retry) < maxFlushBackoff/2 {
+		t.Errorf("retryAfter=%s away — an access failure needs operator action, so back off fully",
+			time.Until(retry))
+	}
+	if st := r.Status(); st == nil || !st.TokenDenied {
+		t.Error("Status() must expose tokenDenied so the report can show it")
 	}
 }
 

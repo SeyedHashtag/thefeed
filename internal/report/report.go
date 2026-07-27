@@ -79,6 +79,7 @@ type ghRelayStats struct {
 	PendingFiles int     `json:"pendingFiles"`
 	KnownObjects int     `json:"knownObjects"`
 	Quota403     bool    `json:"quotaExhausted"`
+	TokenDenied  bool    `json:"tokenDenied"`
 	FailStreak   int     `json:"failStreak"`
 	LastError    string  `json:"lastError"`
 }

@@ -215,6 +215,8 @@ func renderDashboard(a *aggregate, accounts, top int, live bool) string {
 			w("  Awaiting commit    : %14s   %sblobs uploaded, not yet committed%s\n",
 				comma(int64(r.PendingFiles)), cDim, cReset)
 			switch {
+			case r.TokenDenied:
+				w("  %sStatus             : TOKEN LACKS ACCESS — re-grant this repo on the token%s\n", cBold, cReset)
 			case r.Quota403:
 				w("  %sStatus             : REPO FULL — recreate the repo; uploads are blocked%s\n", cBold, cReset)
 			case r.FailStreak > 0:
