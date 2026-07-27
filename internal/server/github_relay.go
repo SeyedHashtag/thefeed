@@ -58,6 +58,10 @@ const (
 // happens; with it, uploads resume about a minute later.
 const recoveryProbeEvery = time.Minute
 
+// uploadErrLogEvery throttles the blob-upload failure log. These errors are
+// per-file, so an outage would otherwise print one line per media item.
+const uploadErrLogEvery = time.Minute
+
 // GitHubRelay uploads encrypted media to a GitHub repo. Domain and object
 // names are HMAC'd; blobs are AES-256-GCM. Uploads are batched into one
 // Git Data API commit per flush.
@@ -79,11 +83,14 @@ type GitHubRelay struct {
 	// uploadSem bounds concurrent blob uploads; see uploadConcurrency.
 	uploadSem chan struct{}
 
-	failStreak     int
-	retryAfter     time.Time
-	quotaExhausted bool
-	tokenDenied    bool
-	lastFlushErr   string
+	failStreak       int
+	retryAfter       time.Time
+	quotaExhausted   bool
+	tokenDenied      bool
+	lastFlushErr     string
+	uploadFails      int
+	lastUploadErrLog time.Time
+
 	// lastProbeOK is the previous recovery-probe verdict. Only a false→true
 	// transition clears the backoff, so a remote that reads fine but still
 	// rejects writes doesn't retry (or re-log) every probe.
@@ -328,7 +335,18 @@ func (g *GitHubRelay) Upload(ctx context.Context, body []byte) error {
 		if isQuotaExhausted(err) || isTokenAccessDenied(err) {
 			g.noteFlushFailureLocked(err)
 		} else {
+			// Must log here: the media cache reports upload errors through a
+			// debug-gated logger, and this branch deliberately skips the
+			// backoff path, so without this a failing relay is completely
+			// silent — no log, no failStreak, and the report reads "ok".
+			// Throttled so a persistently broken remote doesn't flood the log.
 			g.lastFlushErr = trimErrBody(err.Error())
+			g.uploadFails++
+			if now := time.Now(); now.Sub(g.lastUploadErrLog) >= uploadErrLogEvery {
+				g.lastUploadErrLog = now
+				log.Printf("[gh-relay] blob upload failed (%d since last report): %v", g.uploadFails, err)
+				g.uploadFails = 0
+			}
 		}
 		g.mu.Unlock()
 		return fmt.Errorf("create blob: %w", err)
@@ -339,6 +357,7 @@ func (g *GitHubRelay) Upload(ctx context.Context, body []byte) error {
 		g.mu.Unlock()
 		return nil
 	}
+	g.lastFlushErr = ""
 	g.ready[key] = &readyObject{sha: sha, size: size, crc: crc}
 	overLimit := len(g.ready) >= flushBatchLimit
 	g.mu.Unlock()

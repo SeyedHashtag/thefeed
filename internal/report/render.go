@@ -221,6 +221,10 @@ func renderDashboard(a *aggregate, accounts, top int, live bool) string {
 				w("  %sStatus             : REPO FULL — recreate the repo; uploads are blocked%s\n", cBold, cReset)
 			case r.FailStreak > 0:
 				w("  Status             : %sfailing (streak %d) %s%s\n", cBold, r.FailStreak, r.LastError, cReset)
+			case r.LastError != "":
+				// Uploads are failing without arming the backoff (a transient
+				// or unclassified error). Never render this as "ok".
+				w("  Status             : %sdegraded — %s%s\n", cBold, r.LastError, cReset)
 			default:
 				w("  Status             : %14s\n", "ok")
 			}

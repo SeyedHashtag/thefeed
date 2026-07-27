@@ -626,6 +626,62 @@ func TestRelayProbeDoesNotLoopWhenWritesStillFail(t *testing.T) {
 	}
 }
 
+// An upload failure that isn't quota/token-denied must still be visible: it
+// skips the backoff path on purpose, and the media cache reports it through a
+// debug-gated logger, so the relay would otherwise fail completely silently
+// while the report claimed "ok".
+func TestRelayUnclassifiedUploadFailureIsVisible(t *testing.T) {
+	f := &eagerFake{
+		blobStatus:  http.StatusNotFound,
+		blobMessage: "Not Found",
+	}
+	r := newEagerRelay(t, f)
+
+	if err := r.Upload(context.Background(), bytes.Repeat([]byte("a"), 2048)); err == nil {
+		t.Fatal("expected the upload to fail")
+	}
+
+	st := r.Status()
+	if st == nil {
+		t.Fatal("no status")
+	}
+	if st.LastError == "" {
+		t.Error("LastError must record the failure so the report can surface it")
+	}
+	// It must NOT be treated as an operator-action state (no backoff armed).
+	if st.Quota403 || st.TokenDenied {
+		t.Error("an unclassified error must not be classified as quota/token failure")
+	}
+	r.mu.Lock()
+	retry := r.retryAfter
+	r.mu.Unlock()
+	if retry.After(time.Now()) {
+		t.Error("an unclassified error must not arm the global backoff")
+	}
+}
+
+// A later successful upload must clear the stale error so the report stops
+// reporting a problem that is over.
+func TestRelaySuccessfulUploadClearsLastError(t *testing.T) {
+	f := &eagerFake{blobStatus: http.StatusNotFound, blobMessage: "Not Found"}
+	r := newEagerRelay(t, f)
+
+	if err := r.Upload(context.Background(), bytes.Repeat([]byte("a"), 2048)); err == nil {
+		t.Fatal("expected the first upload to fail")
+	}
+	if r.Status().LastError == "" {
+		t.Fatal("precondition: LastError should be set")
+	}
+
+	f.set(func(e *eagerFake) { e.blobStatus = 0 })
+	if err := r.Upload(context.Background(), bytes.Repeat([]byte("b"), 2048)); err != nil {
+		t.Fatalf("upload after recovery: %v", err)
+	}
+	if got := r.Status().LastError; got != "" {
+		t.Errorf("LastError=%q, want cleared after a successful upload", got)
+	}
+}
+
 // The converse: a healthy repo whose folder is present must keep its index.
 func TestRelayKeepsIndexWhenFolderPresent(t *testing.T) {
 	f := &eagerFake{}
