@@ -287,6 +287,7 @@ class AndroidBridge(private val activity: Activity) {
     private fun runDownload(url: String, fallbackName: String) {
         val resolver = activity.contentResolver
         var target: Uri? = null
+        var safe = fallbackName
         try {
             val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
                 connectTimeout = 30_000
@@ -300,7 +301,7 @@ class AndroidBridge(private val activity: Activity) {
                 // The server names the asset (it encodes the ABI, e.g.
                 // ...-arm64-v8a.apk); fall back to the caller's guess.
                 val header = conn.getHeaderField("X-Download-Filename")
-                val safe = if (header.isNullOrBlank()) fallbackName else sanitiseFilename(header)
+                if (!header.isNullOrBlank()) safe = sanitiseFilename(header)
 
                 val out: java.io.OutputStream
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
