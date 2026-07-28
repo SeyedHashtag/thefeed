@@ -43,8 +43,8 @@ const downloadSrc = extractFns(coreSrc, ['triggerDownload', 'anchorDownload']);
 
 // --- Harness: a fresh fake environment per scenario -------------------------
 // Records whether an <a download> click happened and whether share() was used.
-function setupEnv({ share, canShare, canShareFiles, bridge }) {
-  const state = { anchorClicks: [], shared: 0, bridgeSaves: [] };
+function setupEnv({ share, canShare, canShareFiles, bridge, readerFails, saveResult }) {
+  const state = { anchorClicks: [], shared: 0, bridgeSaves: [], toasts: [] };
 
   const anchor = () => ({
     href: '', download: '', click() { state.anchorClicks.push(this.download); },
@@ -61,11 +61,18 @@ function setupEnv({ share, canShare, canShareFiles, bridge }) {
   globalThis.setTimeout = () => 0;
   globalThis.URL = { createObjectURL: () => 'blob:x', revokeObjectURL() { } };
   globalThis.File = class { constructor(parts, name, opts) { this.name = name; this.type = (opts || {}).type; } };
-  globalThis.showToast = () => { };
+  globalThis.showToast = m => { state.toasts.push(m); };
+  globalThis.t = k => k;
   globalThis.FileReader = class {
-    readAsDataURL(b) { this.result = 'data:' + (b.type || '') + ';base64,QkFTRTY0'; this.onload(); }
+    readAsDataURL(b) {
+      if (readerFails) { this.onerror(); return; }
+      this.result = 'data:' + (b.type || '') + ';base64,QkFTRTY0';
+      this.onload();
+    }
   };
-  const nativeBridge = { saveMedia(b64, mime, name) { state.bridgeSaves.push({ name, mime, b64 }); } };
+  const nativeBridge = {
+    saveMedia(b64, mime, name) { state.bridgeSaves.push({ name, mime, b64 }); return saveResult; }
+  };
   globalThis.Android = bridge === 'android' ? nativeBridge : undefined;
   globalThis.IOS = bridge === 'ios' ? nativeBridge : undefined;
 
@@ -130,6 +137,40 @@ const flush = () => new Promise(r => setImmediate(r));
   globalThis.triggerDownload({ type: '' }, 'd.bin');
   await flush();
   check('bridge gets a fallback mime', st.bridgeSaves.map(s => s.mime), ['application/octet-stream']);
+}
+
+// ===== An extensionless name keeps its name =====
+// octet-stream is not an extension: the update asset thefeed-client-android-arm64
+// was being saved as thefeed-client-android-arm64.octet-stream, which no OS runs.
+{
+  const st = setupEnv({ share: false, canShare: false, bridge: 'android' });
+  globalThis.triggerDownload(blob, 'thefeed-client-android-arm64');
+  await flush();
+  check('octet-stream adds no extension', st.bridgeSaves.map(s => s.name),
+    ['thefeed-client-android-arm64']);
+}
+
+// ===== The caller can tell a failed save from a good one =====
+// Callers persist "already downloaded" state on success, so an unreported
+// failure silently suppresses the update prompt for a file that never landed.
+{
+  const st = setupEnv({ share: false, canShare: false, bridge: 'android', saveResult: false });
+  check('bridge failure resolves false', await globalThis.triggerDownload(blob, 'e.bin'), false);
+  check('bridge failure still attempted the save', st.bridgeSaves.length, 1);
+}
+{
+  const st = setupEnv({ share: false, canShare: false, bridge: 'ios', readerFails: true });
+  check('reader error resolves false', await globalThis.triggerDownload(blob, 'f.bin'), false);
+  // Translated, not a hardcoded English string: t() is stubbed to echo the key.
+  check('reader error tells the user', st.toasts, ['save_failed']);
+}
+{
+  setupEnv({ share: false, canShare: false, bridge: 'ios' });
+  check('iOS undefined return counts as saved', await globalThis.triggerDownload(blob, 'g.bin'), true);
+}
+{
+  setupEnv({ share: false, canShare: false });
+  check('anchor path resolves true', await globalThis.triggerDownload(blob, 'h.bin'), true);
 }
 
 console.log(`${passed} passed, ${failed} failed`);

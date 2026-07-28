@@ -241,10 +241,16 @@ class AndroidBridge(private val activity: Activity) {
     // JS starts the transfer and then polls downloadStatus().
 
     private val dlLock = Any()
-    private var dlState = "idle" // idle | running | done | error
+    private var dlState = "idle" // idle | running | done | error | canceled
     private var dlReceived = 0L
     private var dlTotal = 0L
     private var dlDetail = "" // saved name on success, message on error
+
+    // Read by the transfer thread on every buffer, so it must not be cached.
+    @Volatile private var dlCancel = false
+
+    /** Raised on the transfer thread when the user cancels. */
+    private class DownloadCanceled : java.io.IOException("canceled")
 
     /** Starts a background download of url into Downloads/. Returns false if
      *  it could not be started (storage permission still pending). */
@@ -257,6 +263,7 @@ class AndroidBridge(private val activity: Activity) {
         }
         synchronized(dlLock) {
             if (dlState == "running") return true // already in flight
+            dlCancel = false
             dlState = "running"
             dlReceived = 0L
             dlTotal = 0L
@@ -268,6 +275,14 @@ class AndroidBridge(private val activity: Activity) {
             start()
         }
         return true
+    }
+
+    /** Aborts an in-flight download; the partial file is discarded. Without
+     *  this the transfer ran to completion after the user cancelled. */
+    @JavascriptInterface
+    fun cancelDownload() {
+        synchronized(dlLock) { if (dlState != "running") return }
+        dlCancel = true
     }
 
     /** Progress for the JS poller: {"state","received","total","detail"}. */
@@ -284,9 +299,20 @@ class AndroidBridge(private val activity: Activity) {
         }
     }
 
+    /** Drops a half-written file so Downloads never holds a truncated APK. */
+    private fun discardPartial(resolver: android.content.ContentResolver, target: Uri?, legacy: File?) {
+        if (target != null) {
+            try { resolver.delete(target, null, null) } catch (ignored: Exception) { }
+        }
+        if (legacy != null) {
+            try { legacy.delete() } catch (ignored: Exception) { }
+        }
+    }
+
     private fun runDownload(url: String, fallbackName: String) {
         val resolver = activity.contentResolver
         var target: Uri? = null
+        var legacy: File? = null // pre-Q has no pending flag; delete by path
         var safe = fallbackName
         try {
             val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
@@ -319,7 +345,9 @@ class AndroidBridge(private val activity: Activity) {
                     @Suppress("DEPRECATION")
                     val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                     if (!dir.exists()) dir.mkdirs()
-                    out = FileOutputStream(File(dir, safe))
+                    val f = File(dir, safe)
+                    legacy = f
+                    out = FileOutputStream(f)
                 }
 
                 conn.inputStream.use { input ->
@@ -327,6 +355,7 @@ class AndroidBridge(private val activity: Activity) {
                         val buf = ByteArray(64 * 1024)
                         var got = 0L
                         while (true) {
+                            if (dlCancel) throw DownloadCanceled()
                             val n = input.read(buf)
                             if (n < 0) break
                             os.write(buf, 0, n)
@@ -349,12 +378,12 @@ class AndroidBridge(private val activity: Activity) {
             }
             finishDownload("done", safe)
             toast("Saved to Downloads/$safe")
+        } catch (e: DownloadCanceled) {
+            discardPartial(resolver, target, legacy)
+            finishDownload("canceled", "")
         } catch (e: Exception) {
             Log.e(TAG, "startDownload failed", e)
-            // Drop the half-written pending entry so Downloads isn't littered.
-            if (target != null) {
-                try { resolver.delete(target, null, null) } catch (ignored: Exception) { }
-            }
+            discardPartial(resolver, target, legacy)
             finishDownload("error", e.message ?: "download failed")
         }
     }

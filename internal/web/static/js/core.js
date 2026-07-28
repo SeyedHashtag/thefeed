@@ -553,8 +553,8 @@ function showInputDialog(opts) {
   });
 }
 
-// triggerDownload saves a blob to the user's device. On iOS WKWebView the
-// <a download> attribute is ignored, so we use the Web Share API instead.
+// triggerDownload saves a blob to the user's device. Resolves false only when
+// a save definitely failed; iOS and the anchor path cannot report either way.
 function triggerDownload(blob, filename) {
   // Ensure the filename has an extension — iOS share sheet and Android
   // bridge use it literally, unlike <a download> which infers from MIME.
@@ -564,7 +564,9 @@ function triggerDownload(blob, filename) {
       'audio/ogg': '.ogg', 'application/pdf': '.pdf' }[blob.type];
     if (!ext) {
       var sub = blob.type.split('/')[1];
-      if (sub) ext = '.' + sub.replace(/\+.*$/, '');
+      // octet-stream names no real extension; ".octet-stream" would leave a
+      // file no OS can open.
+      if (sub && sub !== 'octet-stream') ext = '.' + sub.replace(/\+.*$/, '');
     }
     if (ext) filename += ext;
   }
@@ -575,17 +577,22 @@ function triggerDownload(blob, filename) {
   // sheet has no "save" entry at all.
   var bridge = (typeof window !== 'undefined') ? (window.Android || window.IOS) : null;
   if (bridge && typeof bridge.saveMedia === 'function') {
-    var reader = new FileReader();
-    reader.onload = function () {
-      var b64 = (reader.result || '').split(',')[1] || '';
-      try { bridge.saveMedia(b64, blob.type || 'application/octet-stream', filename); }
-      catch (e) { showToast('Save failed'); }
-    };
-    reader.readAsDataURL(blob);
-    return;
+    return new Promise(function (resolve) {
+      var fail = function () { showToast(t('save_failed')); resolve(false); };
+      var reader = new FileReader();
+      reader.onload = function () {
+        var b64 = (reader.result || '').split(',')[1] || '';
+        // Android returns false on failure; iOS returns undefined either way.
+        try { resolve(bridge.saveMedia(b64, blob.type || 'application/octet-stream', filename) !== false); }
+        catch (e) { fail(); }
+      };
+      reader.onerror = fail;
+      reader.readAsDataURL(blob);
+    });
   }
   // Every desktop browser handles this natively.
   anchorDownload(blob, filename);
+  return Promise.resolve(true);
 }
 
 function anchorDownload(blob, filename) {

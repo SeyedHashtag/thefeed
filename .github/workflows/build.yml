@@ -3,6 +3,15 @@ name: Build
 on:
   push:
     tags: ['v*']
+  # Manual test builds. Artifacts only — the release job is gated on a tag
+  # ref, so nothing started from here can ever publish a release.
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'What to build (downloadable from this run, never released)'
+        type: choice
+        default: all
+        options: [all, android, desktop, ios, macos]
 
 permissions:
   contents: write
@@ -30,6 +39,7 @@ jobs:
 
   build:
     needs: test
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","desktop"]'), inputs.platforms)
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -79,7 +89,7 @@ jobs:
         if: matrix.goos == 'windows'
         run: |
           go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           VER_NUM="${VERSION#v}"
           # Strip any -dirty / -rc / commit suffix so the numeric
           # FixedFileInfo accepts the parse. The StringFileInfo path
@@ -106,7 +116,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
         run: |
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           COMMIT=$(git rev-parse --short HEAD)
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           # Keep symbols on Windows (strip elsewhere): a stripped Go .exe looks
@@ -126,7 +136,7 @@ jobs:
           GOARM: ${{ matrix.goarm || '' }}
           CGO_ENABLED: '0'
         run: |
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           COMMIT=$(git rev-parse --short HEAD)
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           ext=""
@@ -213,6 +223,7 @@ jobs:
 
   android-apk:
     needs: test
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","android"]'), inputs.platforms)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -237,7 +248,7 @@ jobs:
       - name: Build gomobile AAR
         run: |
           export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           COMMIT=$(git rev-parse --short HEAD)
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           # -s -w drops the symbol table + DWARF (saves ~12 MB per
@@ -279,7 +290,7 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           if [ ! -x ./gradlew ]; then gradle wrapper --gradle-version 8.10.2; fi
           if [ -f app/keystore.jks ]; then BT=release; TASK=assembleRelease; else BT=debug; TASK=assembleDebug; fi
 
@@ -313,6 +324,7 @@ jobs:
 
   ios-ipa:
     needs: test
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","ios"]'), inputs.platforms)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -334,7 +346,7 @@ jobs:
 
       - name: Build Mobile.xcframework
         run: |
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           COMMIT=$(git rev-parse --short HEAD)
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           LDFLAGS="-X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE}"
@@ -342,7 +354,7 @@ jobs:
 
       - name: Archive (unsigned)
         run: |
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           MARKETING_VERSION=${VERSION#v}
           BUILD_NUMBER=$(git rev-list --count HEAD)
           xcodebuild \
@@ -361,7 +373,7 @@ jobs:
 
       - name: Pack unsigned IPA
         run: |
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           mkdir -p build/Payload
           cp -r build/Thefeed.xcarchive/Products/Applications/Thefeed.app build/Payload/
           (cd build && zip -qry "thefeed-ios-${VERSION}-unsigned.ipa" Payload)
@@ -375,6 +387,7 @@ jobs:
 
   macos-dmg:
     needs: test
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","macos"]'), inputs.platforms)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
