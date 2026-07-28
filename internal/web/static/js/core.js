@@ -241,8 +241,16 @@ async function init() {
   // the background so a slow github.com response can't delay startup —
   // if there's an update, the dialog shows up a few seconds later.
   // Skipped on iOS: App Store / TestFlight handles updates there.
+  // Repair skip flags written by the old download path BEFORE checking — the
+  // check reads the same value back, so racing it would cost another launch.
+  // Runs on every platform: the flag outlives the shell it was written on.
+  var updateRepair = fetch('/api/settings')
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(migrateLegacyUpdateSkip)
+    .catch(function () { });
   if (typeof IOS === 'undefined') {
-    checkGitHubUpdate(false).catch(function () { });
+    updateRepair.then(function () { return checkGitHubUpdate(false); })
+      .catch(function () { });
   } else {
     var ghBtn = document.getElementById('checkGitHubBtn');
     if (ghBtn) ghBtn.style.display = 'none';

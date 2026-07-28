@@ -421,13 +421,11 @@ async function checkGitHubUpdate(manual) {
         if (normalizeVersion(skipped) === normalizeVersion(data.latest)) return;
         // Already saved but evidently not installed (we are still running the
         // old build): remind how to finish rather than offering the download
-        // again, and only once per launch so it does not nag.
+        // again. Shown every launch, like the normal prompt — "don't show
+        // again" is the way out. A once-per-session guard lived here and was
+        // wrong: sessionStorage outlives app restarts while the browser tab
+        // stays open, so the reminder appeared once and never again.
         if (normalizeVersion(downloaded) === normalizeVersion(data.latest)) {
-          var seenKey = 'thefeed_update_reminded_' + normalizeVersion(data.latest);
-          try {
-            if (sessionStorage.getItem(seenKey) === '1') return;
-            sessionStorage.setItem(seenKey, '1');
-          } catch (e) { }
           showUpdateReminder(data.latest, data.downloadURL);
           return;
         }
@@ -466,6 +464,28 @@ function showUpdateDialog(newVersion, url) {
   overlay.querySelector('#updateDownload').onclick = function () {
     runUpdateDownload(newVersion, overlay);
   };
+}
+
+// migrateLegacyUpdateSkip clears skipUpdateVersion values written by the old
+// download path, which reused the skip flag to mean "downloaded" and so hid
+// that version's update for good. Runs once per install (the marker lives on
+// the server, so a new loopback port can't make it repeat). An explicit "don't
+// show again" from before the change is cleared too — there is no way to tell
+// the two apart, and re-showing a prompt once beats hiding updates forever.
+function migrateLegacyUpdateSkip(s) {
+  if (!s || s.updateSkipMigrated) return Promise.resolve();
+  try {
+    Object.keys(localStorage)
+      .filter(function (k) { return k.indexOf('thefeed_skip_gh_update_') === 0; })
+      .forEach(function (k) { localStorage.removeItem(k); });
+  } catch (e) { }
+  // Returned so the caller can wait: the update check reads this same value
+  // back, and racing it would suppress the prompt for one more launch.
+  return fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skipUpdateVersion: '', updateSkipMigrated: true })
+  }).catch(function () { });
 }
 
 // persistUpdateSkip records an explicit "don't show again" — permanent for

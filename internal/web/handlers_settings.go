@@ -44,6 +44,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"profilePicsEnabled": pl.ProfilePicsEnabled,
 			"skipUpdateVersion":  pl.SkipUpdateVersion,
 			"downloadedVersion":  pl.DownloadedVersion,
+			"updateSkipMigrated": pl.UpdateSkipMigrated,
 			"queryMode":          qm,
 			"rateLimit":          rl,
 			"scatter":            sc,
@@ -66,6 +67,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			ProfilePicsEnabled *bool    `json:"profilePicsEnabled"`
 			SkipUpdateVersion  *string  `json:"skipUpdateVersion"`
 			DownloadedVersion  *string  `json:"downloadedVersion"`
+			UpdateSkipMigrated *bool    `json:"updateSkipMigrated"`
 			QueryMode          *string  `json:"queryMode"`
 			RateLimit          *float64 `json:"rateLimit"`
 			Scatter            *int     `json:"scatter"`
@@ -119,6 +121,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.DownloadedVersion != nil {
 			pl.DownloadedVersion = *req.DownloadedVersion
+		}
+		if req.UpdateSkipMigrated != nil {
+			pl.UpdateSkipMigrated = *req.UpdateSkipMigrated
 		}
 		if req.QueryMode != nil && (*req.QueryMode == "single" || *req.QueryMode == "double") {
 			pl.QueryMode = *req.QueryMode

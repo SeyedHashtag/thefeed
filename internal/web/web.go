@@ -107,6 +107,10 @@ type ProfileList struct {
 	// necessarily installed. Kept apart from SkipUpdateVersion so downloading
 	// never silently suppresses the prompt for good.
 	DownloadedVersion string `json:"downloadedVersion,omitempty"`
+	// UpdateSkipMigrated marks the one-time clear of SkipUpdateVersion values
+	// written by the old download path, which reused the skip flag to mean
+	// "downloaded" and so hid that version's update permanently.
+	UpdateSkipMigrated bool `json:"updateSkipMigrated,omitempty"`
 	// ResolverBank is the shared pool of DNS resolvers used by all profiles.
 	ResolverBank []string `json:"resolverBank,omitempty"`
 	// ResolverScores stores accumulated performance data for bank resolvers.

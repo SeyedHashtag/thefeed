@@ -84,3 +84,35 @@ func TestDownloadedVersionCanBeCleared(t *testing.T) {
 		t.Errorf("downloadedVersion = %v, want empty", v)
 	}
 }
+
+// The one-time repair must be able to clear a legacy skip and latch its
+// marker in a single patch, so it never runs twice.
+func TestUpdateSkipMigrationClearsAndLatches(t *testing.T) {
+	s := &Server{dataDir: t.TempDir()}
+	postSettings(t, s, `{"skipUpdateVersion":"v0.34.0"}`)
+	if got := getSettings(t, s)["skipUpdateVersion"]; got != "v0.34.0" {
+		t.Fatalf("setup: skipUpdateVersion = %v", got)
+	}
+	if m := getSettings(t, s)["updateSkipMigrated"]; m != false {
+		t.Errorf("fresh install should not be marked migrated, got %v", m)
+	}
+
+	postSettings(t, s, `{"skipUpdateVersion":"","updateSkipMigrated":true}`)
+	got := getSettings(t, s)
+	if v := got["skipUpdateVersion"]; v != "" && v != nil {
+		t.Errorf("legacy skip not cleared: %v", v)
+	}
+	if got["updateSkipMigrated"] != true {
+		t.Errorf("marker not latched: %v", got["updateSkipMigrated"])
+	}
+
+	// A later explicit skip still works and must not be undone by the marker.
+	postSettings(t, s, `{"skipUpdateVersion":"v0.40.0"}`)
+	got = getSettings(t, s)
+	if got["skipUpdateVersion"] != "v0.40.0" {
+		t.Errorf("post-migration skip = %v, want v0.40.0", got["skipUpdateVersion"])
+	}
+	if got["updateSkipMigrated"] != true {
+		t.Errorf("marker lost: %v", got["updateSkipMigrated"])
+	}
+}

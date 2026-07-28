@@ -408,7 +408,7 @@ jobs:
       # hdiutil are all on PATH.
       - name: Build macOS DMG
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}
         run: |
           make mac-dmg VERSION="${VERSION}"
           ls -lh build/thefeed-macos-*.dmg
