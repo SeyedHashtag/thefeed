@@ -92,7 +92,17 @@ jobs:
       - name: Generate Windows PE resources
         if: matrix.goos == 'windows'
         run: |
-          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+          # Pinned, and the arch flags passed explicitly: v1.7.0 defaults BOTH
+          # -64 and -arm to true, so the tool emits a 64-bit resource object.
+          # Linking that into a 386 build fails with "unknown relocation type
+          # 3". Relying on the defaults is what broke the 32-bit build.
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.7.0
+          case "${{ matrix.goarch }}" in
+            386)   ARCHFLAGS="-64=false -arm=false" ;;
+            amd64) ARCHFLAGS="-64 -arm=false" ;;
+            arm64) ARCHFLAGS="-64 -arm" ;;
+            *)     ARCHFLAGS="" ;;
+          esac
           VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           VER_NUM="${VERSION#v}"
           # Strip any -dirty / -rc / commit suffix so the numeric
@@ -103,7 +113,7 @@ jobs:
           V_MIN=$(echo "$NUM_ONLY" | awk -F. '{print $2+0}')
           V_PATCH=$(echo "$NUM_ONLY" | awk -F. '{print $3+0}')
           for d in cmd/server cmd/client; do
-            (cd "$d" && goversioninfo \
+            (cd "$d" && goversioninfo $ARCHFLAGS \
               -ver-major="$V_MAJ" \
               -ver-minor="$V_MIN" \
               -ver-patch="$V_PATCH" \

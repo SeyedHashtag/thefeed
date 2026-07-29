@@ -51,3 +51,6 @@ build/ios/ipa
 
 # Stale backups (sed/in-place edits)
 *.bak
+
+# Generated Windows PE resources (goversioninfo, per-arch, made in CI)
+*.syso
