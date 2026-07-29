@@ -18,6 +18,7 @@ func main() {
 	host := flag.String("host", "127.0.0.1", "Web UI listen address (host), use 0.0.0.0 to expose to LAN")
 	password := flag.String("password", "", "Admin password for web UI (empty = no auth)")
 	shared := flag.Bool("shared", false, "Shared/multi-user backend: keep unread (seen) state per-browser in localStorage instead of on the server. Use with --host 0.0.0.0 when several people connect to one backend.")
+	openUI := flag.Bool("open", true, "Open the web UI in your browser on start (-open=false for headless or server runs)")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "thefeed-client %s\n\nWeb UI for reading thefeed content over DNS.\n\nUsage:\n  thefeed-client [flags]\n\nFlags:\n", version.Version)
@@ -36,15 +37,16 @@ func main() {
 	}
 	srv.SetSharedBackend(*shared)
 
-	// Try to open browser automatically
-
-	// Open browser on the chosen host (localhost if default)
-	browserHost := *host
-	if browserHost == "0.0.0.0" {
-		browserHost = "127.0.0.1"
+	// Open the UI on the chosen host (localhost if default). Headless and
+	// server deployments pass -open=false; there is nothing to open there,
+	// and on a desktop it steals focus on every restart.
+	if *openUI {
+		browserHost := *host
+		if browserHost == "0.0.0.0" {
+			browserHost = "127.0.0.1"
+		}
+		go openBrowser(fmt.Sprintf("http://%s:%d", browserHost, *port))
 	}
-	url := fmt.Sprintf("http://%s:%d", browserHost, *port)
-	go openBrowser(url)
 
 	if err := srv.Run(); err != nil {
 		log.Fatalf("Server error: %v", err)
