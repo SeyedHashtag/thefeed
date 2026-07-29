@@ -466,32 +466,85 @@ function showUpdateDialog(newVersion, url) {
   };
 }
 
-// migrateLegacyUpdateSkip clears skipUpdateVersion values written by the old
-// download path, which reused the skip flag to mean "downloaded" and so hid
-// that version's update for good. Runs once per install (the marker lives on
-// the server, so a new loopback port can't make it repeat). An explicit "don't
-// show again" from before the change is cleared too — there is no way to tell
-// the two apart, and re-showing a prompt once beats hiding updates forever.
-function migrateLegacyUpdateSkip(s) {
-  if (!s || s.updateSkipMigrated) return Promise.resolve();
-  try {
-    Object.keys(localStorage)
-      .filter(function (k) { return k.indexOf('thefeed_skip_gh_update_') === 0; })
-      .forEach(function (k) { localStorage.removeItem(k); });
-  } catch (e) { }
-  // Returned so the caller can wait: the update check reads this same value
-  // back, and racing it would suppress the prompt for one more launch.
+// ===== ONE-TIME DATA MIGRATIONS =====
+// Append-only list; the index+1 is the migration number. The applied level
+// lives on the server (migrationVersion) because several of these touch
+// localStorage, which Android drops whenever the loopback port changes — a
+// local marker would replay them on every relaunch. Each entry mutates the
+// settings patch that gets POSTed once all pending steps have run.
+var TF_MIGRATIONS = [
+  // 1 — the old download path wrote skipUpdateVersion (the "don't show again"
+  // field) to mean "downloaded", so any version the user downloaded had its
+  // update prompt hidden for good. Clear those values, server and local. A
+  // genuine "don't show again" from before the split is cleared too: the two
+  // are indistinguishable after the fact, and re-asking once is a far smaller
+  // harm than never offering the update again.
+  function (patch) {
+    try {
+      Object.keys(localStorage)
+        .filter(function (k) { return k.indexOf('thefeed_skip_gh_update_') === 0; })
+        .forEach(function (k) { localStorage.removeItem(k); });
+    } catch (e) { }
+    patch.skipUpdateVersion = '';
+  }
+];
+
+function tfLocalMigrationLevel() {
+  try { return parseInt(localStorage.getItem('thefeed_migration_level') || '0', 10) || 0; }
+  catch (e) { return 0; }
+}
+
+// runPendingMigrations applies everything above this install's recorded level.
+// Returns a promise so callers that read migrated values back can wait —
+// racing it would leave the old data in play for one more launch.
+//
+// Where the level is recorded depends on the deployment, and both directions
+// matter:
+//   single-user client — the loopback port changes between launches and wipes
+//     localStorage, so a local marker would replay every migration forever.
+//     The level lives on the server.
+//   shared backend — one profiles.json serves every visitor, but these
+//     migrations clean per-browser localStorage. A server-side level would let
+//     the first visitor mark them done for everyone, leaving every other
+//     browser un-migrated. Each browser tracks its own level, and none of them
+//     writes global settings on behalf of the others.
+function runPendingMigrations(s) {
+  if (!s) return Promise.resolve();
+  var shared = !!s.shared;
+  var applied = shared ? tfLocalMigrationLevel() : (s.migrationVersion || 0);
+  if (applied >= TF_MIGRATIONS.length) return Promise.resolve();
+  var patch = { migrationVersion: TF_MIGRATIONS.length };
+  for (var i = applied; i < TF_MIGRATIONS.length; i++) {
+    try { TF_MIGRATIONS[i](patch); } catch (e) { }
+  }
+  if (shared) {
+    try { localStorage.setItem('thefeed_migration_level', String(TF_MIGRATIONS.length)); } catch (e) { }
+    return Promise.resolve();
+  }
   return fetch('/api/settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ skipUpdateVersion: '', updateSkipMigrated: true })
+    body: JSON.stringify(patch)
   }).catch(function () { });
+}
+
+// pruneVersionKeys drops every <prefix><version> entry except `keep`. Only the
+// newest release's marker is ever consulted, so without this the app would
+// leave one dead key behind per release, forever.
+function pruneVersionKeys(prefix, keep) {
+  try {
+    Object.keys(localStorage).forEach(function (k) {
+      if (k.indexOf(prefix) === 0 && k !== keep) localStorage.removeItem(k);
+    });
+  } catch (e) { }
 }
 
 // persistUpdateSkip records an explicit "don't show again" — permanent for
 // that version. Local first, so it sticks even if the API call fails.
 function persistUpdateSkip(newVersion) {
-  try { localStorage.setItem('thefeed_skip_gh_update_' + normalizeVersion(newVersion), '1'); } catch (e) { }
+  var key = 'thefeed_skip_gh_update_' + normalizeVersion(newVersion);
+  pruneVersionKeys('thefeed_skip_gh_update_', key);
+  try { localStorage.setItem(key, '1'); } catch (e) { }
   fetch('/api/settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -503,7 +556,9 @@ function persistUpdateSkip(newVersion) {
 // the skip flag: a download the user never installs must still be reminded
 // about, otherwise the prompt is lost for that version for good.
 function persistUpdateDownloaded(newVersion) {
-  try { localStorage.setItem('thefeed_downloaded_gh_update_' + normalizeVersion(newVersion), '1'); } catch (e) { }
+  var key = 'thefeed_downloaded_gh_update_' + normalizeVersion(newVersion);
+  pruneVersionKeys('thefeed_downloaded_gh_update_', key);
+  try { localStorage.setItem(key, '1'); } catch (e) { }
   fetch('/api/settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

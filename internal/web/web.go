@@ -107,10 +107,12 @@ type ProfileList struct {
 	// necessarily installed. Kept apart from SkipUpdateVersion so downloading
 	// never silently suppresses the prompt for good.
 	DownloadedVersion string `json:"downloadedVersion,omitempty"`
-	// UpdateSkipMigrated marks the one-time clear of SkipUpdateVersion values
-	// written by the old download path, which reused the skip flag to mean
-	// "downloaded" and so hid that version's update permanently.
-	UpdateSkipMigrated bool `json:"updateSkipMigrated,omitempty"`
+	// MigrationVersion is the highest one-time data migration already applied
+	// to this install. The frontend owns the migration list (some of them
+	// touch localStorage) and reports the level it reached; keeping the level
+	// here rather than in localStorage stops them replaying every time the
+	// loopback port changes. 0 = nothing applied yet.
+	MigrationVersion int `json:"migrationVersion,omitempty"`
 	// ResolverBank is the shared pool of DNS resolvers used by all profiles.
 	ResolverBank []string `json:"resolverBank,omitempty"`
 	// ResolverScores stores accumulated performance data for bank resolvers.

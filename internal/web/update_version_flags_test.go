@@ -85,34 +85,43 @@ func TestDownloadedVersionCanBeCleared(t *testing.T) {
 	}
 }
 
-// The one-time repair must be able to clear a legacy skip and latch its
-// marker in a single patch, so it never runs twice.
-func TestUpdateSkipMigrationClearsAndLatches(t *testing.T) {
+// Migrations are tracked by level, not one flag per migration, so adding a
+// second one later doesn't need another settings field.
+func TestMigrationVersionClearsLegacySkipAndLatches(t *testing.T) {
 	s := &Server{dataDir: t.TempDir()}
 	postSettings(t, s, `{"skipUpdateVersion":"v0.34.0"}`)
-	if got := getSettings(t, s)["skipUpdateVersion"]; got != "v0.34.0" {
-		t.Fatalf("setup: skipUpdateVersion = %v", got)
-	}
-	if m := getSettings(t, s)["updateSkipMigrated"]; m != false {
-		t.Errorf("fresh install should not be marked migrated, got %v", m)
+	if got := getSettings(t, s)["migrationVersion"]; got != float64(0) {
+		t.Errorf("fresh install should be at level 0, got %v", got)
 	}
 
-	postSettings(t, s, `{"skipUpdateVersion":"","updateSkipMigrated":true}`)
+	// Migration 1 clears the poisoned skip and records the level in one patch.
+	postSettings(t, s, `{"skipUpdateVersion":"","migrationVersion":1}`)
 	got := getSettings(t, s)
 	if v := got["skipUpdateVersion"]; v != "" && v != nil {
 		t.Errorf("legacy skip not cleared: %v", v)
 	}
-	if got["updateSkipMigrated"] != true {
-		t.Errorf("marker not latched: %v", got["updateSkipMigrated"])
+	if got["migrationVersion"] != float64(1) {
+		t.Errorf("migrationVersion = %v, want 1", got["migrationVersion"])
 	}
 
-	// A later explicit skip still works and must not be undone by the marker.
+	// A later explicit skip survives; the level is untouched by it.
 	postSettings(t, s, `{"skipUpdateVersion":"v0.40.0"}`)
 	got = getSettings(t, s)
 	if got["skipUpdateVersion"] != "v0.40.0" {
 		t.Errorf("post-migration skip = %v, want v0.40.0", got["skipUpdateVersion"])
 	}
-	if got["updateSkipMigrated"] != true {
-		t.Errorf("marker lost: %v", got["updateSkipMigrated"])
+	if got["migrationVersion"] != float64(1) {
+		t.Errorf("level lost: %v", got["migrationVersion"])
+	}
+}
+
+// The level only ever moves forward. An older client still reporting level 1
+// must not drag a level-2 install back and make migration 2 run twice.
+func TestMigrationVersionNeverGoesBackwards(t *testing.T) {
+	s := &Server{dataDir: t.TempDir()}
+	postSettings(t, s, `{"migrationVersion":2}`)
+	postSettings(t, s, `{"migrationVersion":1}`)
+	if got := getSettings(t, s)["migrationVersion"]; got != float64(2) {
+		t.Errorf("migrationVersion = %v, want 2 (must not regress)", got)
 	}
 }
