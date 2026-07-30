@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sartoopjj/thefeed/internal/update"
 	"github.com/sartoopjj/thefeed/internal/version"
 )
 
@@ -48,7 +49,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			// Multi-user deployment: the frontend keeps per-browser state
 			// (seen markers, migration level) local instead of in the shared
 			// profiles.json, and never writes global settings on its own.
-			"shared":             s.sharedBackend,
+			"shared": s.sharedBackend,
+			// Store build (Google Play): the frontend hides every in-app
+			// update entry point. update.Check already returns nothing and
+			// /api/update/download refuses, so this is belt-and-braces — it
+			// just keeps a dead "check for updates" button off the screen.
+			"storeBuild":         update.StoreBuild(),
 			"queryMode":          qm,
 			"rateLimit":          rl,
 			"scatter":            sc,

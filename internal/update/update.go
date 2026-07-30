@@ -56,8 +56,22 @@ func stopOnRedirect(req *http.Request, via []*http.Request) error {
 
 // Check fetches the latest tag and assembles a Status for the running
 // platform.
+// StoreBuild reports whether this binary ships through an app store
+// (Google Play), where Device and Network Abuse policy forbids an app from
+// downloading executable code or updating itself outside the store. Set by
+// mobile.NewAndroidPlayServer; never set by the GitHub/desktop builds.
+func StoreBuild() bool {
+	return os.Getenv("THEFEED_STORE_BUILD") == "1"
+}
+
 func Check(ctx context.Context) (Status, error) {
 	s := Status{Current: version.Version}
+	// Store builds update through the store. Return before the network call
+	// so there is nothing to show and nothing to download — the UI hides its
+	// update entry points on the same flag.
+	if StoreBuild() {
+		return s, nil
+	}
 	latest, err := fetchLatestTag(ctx, httpClient, LatestReleaseURL)
 	if err != nil {
 		return s, err

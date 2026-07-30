@@ -193,7 +193,12 @@ workflows:
           echo "versionCode = $VC"
           cd android
           [ -x ./gradlew ] || gradle wrapper --gradle-version 8.10.2
+          # -PplayBuild disables the in-app updater (Play forbids an app
+          # distributed through the store from updating itself). The bundle
+          # task alone already implies it in build.gradle; passing it
+          # explicitly keeps the intent visible here.
           ./gradlew --no-daemon bundleRelease \
+            -PplayBuild=true \
             -PversionCode=$VC -PversionName="$APP_MARKETING_VERSION"
     artifacts:
       - android/app/build/outputs/**/*.aab

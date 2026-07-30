@@ -63,6 +63,13 @@ func (s *Server) handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
+	// Defence in depth: a store build must not fetch executable code even if
+	// the UI gate is bypassed (an explicit ?asset= would otherwise skip the
+	// empty-template check below).
+	if update.StoreBuild() {
+		http.Error(w, "in-app updates are disabled in store builds", 403)
+		return
+	}
 	q := r.URL.Query()
 	v := strings.TrimSpace(q.Get("version"))
 	if v == "" {

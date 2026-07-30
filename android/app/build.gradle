@@ -44,6 +44,18 @@ android {
         // Drives which release asset the in-app update prompt links to.
         buildConfigField "boolean", "IS_UNIVERSAL",
             project.hasProperty('universalBuild') ? "true" : "false"
+
+        // Google Play forbids an app distributed through the store from
+        // downloading executable code or updating itself, so the Play build
+        // disables the in-app updater entirely (see NewAndroidPlayServer).
+        // Detected two ways: the explicit -PplayBuild flag, and any 'bundle'
+        // task — an .aab is only ever produced for a store. The task check is
+        // the safety net: forgetting the flag would otherwise ship a store
+        // build with self-update still enabled.
+        buildConfigField "boolean", "IS_PLAY_BUILD",
+            (project.hasProperty('playBuild') ||
+             gradle.startParameter.taskNames.any { it.toLowerCase().contains('bundle') })
+                ? "true" : "false"
     }
 
     buildFeatures {

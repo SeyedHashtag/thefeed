@@ -98,6 +98,15 @@ function pushSeenBulk(ids, hashes) {
   } catch (e) { }
 }
 var appVersion = '', latestVersion = '';
+// True when this build ships through an app store (Google Play), which
+// forbids in-app self-updating. Set from /api/settings at startup.
+var storeBuild = false;
+// hideUpdateEntryPoints removes the manual "check on GitHub" control. Used by
+// iOS (App Store / TestFlight handles updates) and by store builds.
+function hideUpdateEntryPoints() {
+  var btn = document.getElementById('checkGitHubBtn');
+  if (btn) btn.style.display = 'none';
+}
 var profiles = null, activeProfileId = '', editingProfileId = null, resolverScanHint = '', resolverScanHealthy = 0, resolverScanDone = 0, resolverScanTotal = 0;
 var currentMaxMsgID = 0;
 var currentMaxTimestamp = 0;
@@ -246,14 +255,21 @@ async function init() {
   // poisoned install stays silent for one more launch.
   var migrated = fetch('/api/settings')
     .then(function (r) { return r.ok ? r.json() : null; })
-    .then(runPendingMigrations)
+    .then(function (s) {
+      // Store builds (Google Play) update through the store: no prompt, no
+      // check, no button. Play forbids an app from updating itself, and the
+      // server refuses the download regardless — this keeps it silent.
+      storeBuild = !!(s && s.storeBuild);
+      return runPendingMigrations(s);
+    })
     .catch(function () { });
   if (typeof IOS === 'undefined') {
-    migrated.then(function () { return checkGitHubUpdate(false); })
-      .catch(function () { });
+    migrated.then(function () {
+      if (storeBuild) { hideUpdateEntryPoints(); return; }
+      return checkGitHubUpdate(false);
+    }).catch(function () { });
   } else {
-    var ghBtn = document.getElementById('checkGitHubBtn');
-    if (ghBtn) ghBtn.style.display = 'none';
+    hideUpdateEntryPoints();
   }
   try {
     var r = await fetch('/api/status'); var st = await r.json();

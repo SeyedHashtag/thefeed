@@ -392,6 +392,10 @@ function changeAppPassword() {
 // with a download link tailored to their platform.
 // `manual=true` shows a toast on "no update", `manual=false` stays silent.
 async function checkGitHubUpdate(manual) {
+  // Store builds (Google Play) update through the store. Bail before the
+  // request: the button is hidden and the server returns nothing anyway, but
+  // this keeps any other caller from surfacing an update path.
+  if (storeBuild) return;
   try {
     var r = await fetch('/api/update/github');
     if (!r.ok) {
