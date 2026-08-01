@@ -596,7 +596,7 @@ func TestStoreAddRemove(t *testing.T) {
 	if len(list) < len(DefaultChannels)+1 {
 		t.Fatalf("list = %v, want defaults + MyChan", list)
 	}
-	// Defaults pinned at the front.
+	// Defaults come first.
 	for i, want := range DefaultChannels {
 		if list[i] != want {
 			t.Errorf("list[%d] = %q, want %q", i, list[i], want)

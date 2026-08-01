@@ -54,12 +54,11 @@ func (h *telemirrorHub) handleChannels(w http.ResponseWriter, r *http.Request) {
 		titles := h.store.Titles()
 		type entry struct {
 			Username string `json:"username"`
-			Pinned   bool   `json:"pinned"`
 			Title    string `json:"title,omitempty"`
 		}
 		out := make([]entry, 0, len(list))
 		for _, u := range list {
-			out = append(out, entry{Username: u, Pinned: telemirror.IsDefault(u), Title: titles[strings.ToLower(u)]})
+			out = append(out, entry{Username: u, Title: titles[strings.ToLower(u)]})
 		}
 		writeJSON(w, map[string]any{"channels": out})
 

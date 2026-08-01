@@ -12,7 +12,8 @@ import (
 	"time"
 )
 
-// DefaultChannels are pinned in the UI; users cannot remove them.
+// DefaultChannels are listed first on a fresh install. Removable — a
+// removal is recorded in the store's Hidden set.
 var DefaultChannels = []string{"VahidOnline", "networkti", "thefeedconfig"}
 
 // Channel describes the public channel header.
@@ -110,7 +111,7 @@ func SanitizeUsername(s string) string {
 	return string(out)
 }
 
-// IsDefault reports whether username is one of the pinned defaults.
+// IsDefault reports whether username is one of the bundled defaults.
 func IsDefault(username string) bool {
 	for _, d := range DefaultChannels {
 		if strings.EqualFold(d, username) {

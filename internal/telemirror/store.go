@@ -64,7 +64,7 @@ func containsFold(list []string, v string) bool {
 	return false
 }
 
-// List returns the full channel list with defaults pinned to the front.
+// List returns the full channel list, defaults first, minus any the user removed.
 func (s *Store) List() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
