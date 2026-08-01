@@ -54,30 +54,24 @@ func stopOnRedirect(req *http.Request, via []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
-// Check fetches the latest tag and assembles a Status for the running
-// platform.
-// StoreBuild reports whether this binary ships through an app store
-// (Google Play), where Device and Network Abuse policy forbids an app from
-// downloading executable code or updating itself outside the store. Set by
-// mobile.NewAndroidPlayServer; never set by the GitHub/desktop builds.
+// StoreBuild reports whether this binary ships through an app store, where
+// both Google and Apple forbid an app from updating itself.
 func StoreBuild() bool {
-	// iOS ships only through the App Store / TestFlight, and Apple's rule on
-	// downloading executable code matches Google's. gomobile builds the iOS
-	// framework with GOOS=ios, so this needs no Swift change and no new
-	// binding. The macOS .dmg is a separate GOOS=darwin binary and keeps its
-	// updater; the macOS TestFlight app is this same iOS build, and correctly
-	// does not.
-	if runtime.GOOS == "ios" {
-		return true
-	}
-	return os.Getenv("THEFEED_STORE_BUILD") == "1"
+	return storeBuildFor(runtime.GOOS, os.Getenv("THEFEED_STORE_BUILD"))
 }
 
+// storeBuildFor is StoreBuild's testable core. GOOS=ios is how gomobile builds
+// the App Store framework; the env flag comes from mobile.NewAndroidPlayServer.
+// The macOS .dmg is a separate GOOS=darwin binary and keeps its updater.
+func storeBuildFor(goos, env string) bool {
+	return goos == "ios" || env == "1"
+}
+
+// Check fetches the latest tag and assembles a Status for the running
+// platform.
 func Check(ctx context.Context) (Status, error) {
 	s := Status{Current: version.Version}
-	// Store builds update through the store. Return before the network call
-	// so there is nothing to show and nothing to download — the UI hides its
-	// update entry points on the same flag.
+	// Nothing to offer, and returning early keeps a store build off the network.
 	if StoreBuild() {
 		return s, nil
 	}

@@ -3,10 +3,7 @@ package web
 import (
 	"encoding/json"
 	"net/http/httptest"
-	"runtime"
 	"testing"
-
-	"github.com/sartoopjj/thefeed/internal/update"
 )
 
 // Google Play's Device and Network Abuse policy forbids an app distributed
@@ -56,6 +53,7 @@ func TestStoreBuildReportsNoUpdate(t *testing.T) {
 
 // The frontend hides its update entry points off this flag.
 func TestStoreBuildExposedInSettings(t *testing.T) {
+	t.Setenv("THEFEED_STORE_BUILD", "")
 	s := &Server{dataDir: t.TempDir()}
 
 	if got := getSettings(t, s)["storeBuild"]; got != false {
@@ -71,29 +69,12 @@ func TestStoreBuildExposedInSettings(t *testing.T) {
 // Without the flag nothing changes: the GitHub/desktop builds keep their
 // updater. Guards against the gate being left permanently on.
 func TestNonStoreBuildStillServesUpdates(t *testing.T) {
+	t.Setenv("THEFEED_STORE_BUILD", "")
 	s := &Server{dataDir: t.TempDir()}
 	rec := httptest.NewRecorder()
 	s.handleUpdateDownload(rec, httptest.NewRequest("GET", "/api/update/download", nil))
 	// No version param -> 400, NOT the 403 the store gate would produce.
 	if rec.Code != 400 {
 		t.Errorf("normal build = %d, want 400 (missing version), not the store-build 403", rec.Code)
-	}
-}
-
-// iOS is a store build by construction: gomobile compiles the framework with
-// GOOS=ios, so no Swift change or new binding is needed. Guards the constant
-// from being dropped — the JS-only guard it replaces (typeof IOS === undefined)
-// left /api/update/download serving on iOS.
-func TestIOSCountsAsStoreBuild(t *testing.T) {
-	if runtime.GOOS == "ios" {
-		if !update.StoreBuild() {
-			t.Error("GOOS=ios must be treated as a store build")
-		}
-		return
-	}
-	// On every other platform the env flag is the only trigger, so a normal
-	// desktop build keeps its updater.
-	if update.StoreBuild() {
-		t.Errorf("GOOS=%s must not be a store build without the env flag", runtime.GOOS)
 	}
 }

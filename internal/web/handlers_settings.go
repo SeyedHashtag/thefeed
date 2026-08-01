@@ -50,10 +50,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			// (seen markers, migration level) local instead of in the shared
 			// profiles.json, and never writes global settings on its own.
 			"shared": s.sharedBackend,
-			// Store build (Google Play): the frontend hides every in-app
-			// update entry point. update.Check already returns nothing and
-			// /api/update/download refuses, so this is belt-and-braces — it
-			// just keeps a dead "check for updates" button off the screen.
+			// Lets the frontend hide its update entry points.
 			"storeBuild":         update.StoreBuild(),
 			"queryMode":          qm,
 			"rateLimit":          rl,

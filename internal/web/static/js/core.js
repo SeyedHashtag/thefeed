@@ -98,11 +98,9 @@ function pushSeenBulk(ids, hashes) {
   } catch (e) { }
 }
 var appVersion = '', latestVersion = '';
-// True when this build ships through an app store (Google Play), which
-// forbids in-app self-updating. Set from /api/settings at startup.
+// Set from /api/settings at startup; store builds must not self-update.
 var storeBuild = false;
-// hideUpdateEntryPoints removes the manual "check on GitHub" control. Used by
-// iOS (App Store / TestFlight handles updates) and by store builds.
+// Removes the manual "check on GitHub" control.
 function hideUpdateEntryPoints() {
   var btn = document.getElementById('checkGitHubBtn');
   if (btn) btn.style.display = 'none';
@@ -250,15 +248,11 @@ async function init() {
   // the background so a slow github.com response can't delay startup —
   // if there's an update, the dialog shows up a few seconds later.
   // Skipped on iOS: App Store / TestFlight handles updates there.
-  // Migration 1 repairs skip flags the old download path poisoned, and the
-  // update check reads those same values back — so run it first, or a
-  // poisoned install stays silent for one more launch.
+  // Must precede the update check: migration 1 repairs skip flags that the
+  // check reads back, and racing it costs another launch.
   var migrated = fetch('/api/settings')
     .then(function (r) { return r.ok ? r.json() : null; })
     .then(function (s) {
-      // Store builds (Google Play) update through the store: no prompt, no
-      // check, no button. Play forbids an app from updating itself, and the
-      // server refuses the download regardless — this keeps it silent.
       storeBuild = !!(s && s.storeBuild);
       return runPendingMigrations(s);
     })

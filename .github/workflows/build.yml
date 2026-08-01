@@ -92,10 +92,8 @@ jobs:
       - name: Generate Windows PE resources
         if: matrix.goos == 'windows'
         run: |
-          # Pinned, and the arch flags passed explicitly: v1.7.0 defaults BOTH
-          # -64 and -arm to true, so the tool emits a 64-bit resource object.
-          # Linking that into a 386 build fails with "unknown relocation type
-          # 3". Relying on the defaults is what broke the 32-bit build.
+          # Pinned + explicit arch flags: v1.7.0 defaults -64 and -arm to
+          # true, and a 64-bit .syso in a 386 build fails to link.
           go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.7.0
           case "${{ matrix.goarch }}" in
             386)   ARCHFLAGS="-64=false -arm=false" ;;

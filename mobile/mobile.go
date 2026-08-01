@@ -97,12 +97,9 @@ func NewAndroidServer(dataDir string, preferredPort int) (*Server, error) {
 	return NewServer(dataDir, preferredPort)
 }
 
-// NewAndroidPlayServer is NewServer for the Google Play build. It marks the
-// process as a store build, which disables the in-app updater end to end:
-// Play's Device and Network Abuse policy forbids an app distributed through
-// the store from downloading executable code or updating itself. Note it does
-// NOT set THEFEED_ANDROID_APK — that flag is what points the updater at a
-// GitHub APK asset.
+// NewAndroidPlayServer is NewServer for the Google Play build: it disables the
+// in-app updater end to end. Deliberately does NOT set THEFEED_ANDROID_APK —
+// that flag is what points the updater at a GitHub APK asset.
 func NewAndroidPlayServer(dataDir string, preferredPort int) (*Server, error) {
 	os.Setenv("THEFEED_STORE_BUILD", "1")
 	return NewServer(dataDir, preferredPort)

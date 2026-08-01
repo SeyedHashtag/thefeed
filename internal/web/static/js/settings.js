@@ -392,10 +392,7 @@ function changeAppPassword() {
 // with a download link tailored to their platform.
 // `manual=true` shows a toast on "no update", `manual=false` stays silent.
 async function checkGitHubUpdate(manual) {
-  // Store builds (Google Play) update through the store. Bail before the
-  // request: the button is hidden and the server returns nothing anyway, but
-  // this keeps any other caller from surfacing an update path.
-  if (storeBuild) return;
+  if (storeBuild) return; // store builds update through the store
   try {
     var r = await fetch('/api/update/github');
     if (!r.ok) {
@@ -471,18 +468,12 @@ function showUpdateDialog(newVersion, url) {
 }
 
 // ===== ONE-TIME DATA MIGRATIONS =====
-// Append-only list; the index+1 is the migration number. The applied level
-// lives on the server (migrationVersion) because several of these touch
-// localStorage, which Android drops whenever the loopback port changes — a
-// local marker would replay them on every relaunch. Each entry mutates the
-// settings patch that gets POSTed once all pending steps have run.
+// Append-only; index+1 is the migration number. Each entry mutates the
+// settings patch POSTed once all pending steps have run.
 var TF_MIGRATIONS = [
   // 1 — the old download path wrote skipUpdateVersion (the "don't show again"
-  // field) to mean "downloaded", so any version the user downloaded had its
-  // update prompt hidden for good. Clear those values, server and local. A
-  // genuine "don't show again" from before the split is cleared too: the two
-  // are indistinguishable after the fact, and re-asking once is a far smaller
-  // harm than never offering the update again.
+  // field) to mean "downloaded", hiding that version's update for good. A real
+  // "don't show again" is cleared too; the two are indistinguishable now.
   function (patch) {
     try {
       Object.keys(localStorage)
@@ -498,20 +489,11 @@ function tfLocalMigrationLevel() {
   catch (e) { return 0; }
 }
 
-// runPendingMigrations applies everything above this install's recorded level.
-// Returns a promise so callers that read migrated values back can wait —
-// racing it would leave the old data in play for one more launch.
-//
-// Where the level is recorded depends on the deployment, and both directions
-// matter:
-//   single-user client — the loopback port changes between launches and wipes
-//     localStorage, so a local marker would replay every migration forever.
-//     The level lives on the server.
-//   shared backend — one profiles.json serves every visitor, but these
-//     migrations clean per-browser localStorage. A server-side level would let
-//     the first visitor mark them done for everyone, leaving every other
-//     browser un-migrated. Each browser tracks its own level, and none of them
-//     writes global settings on behalf of the others.
+// runPendingMigrations applies everything above this install's level, and
+// resolves once done so callers reading the migrated values can wait.
+// Level lives on the server for a single-user client (its loopback port
+// changes and wipes localStorage), but per-browser on a shared backend, where
+// one profiles.json serves everyone yet each browser has its own localStorage.
 function runPendingMigrations(s) {
   if (!s) return Promise.resolve();
   var shared = !!s.shared;
@@ -532,9 +514,8 @@ function runPendingMigrations(s) {
   }).catch(function () { });
 }
 
-// pruneVersionKeys drops every <prefix><version> entry except `keep`. Only the
-// newest release's marker is ever consulted, so without this the app would
-// leave one dead key behind per release, forever.
+// pruneVersionKeys drops every <prefix><version> entry except `keep` — only
+// the newest is ever read, so the rest would accumulate one per release.
 function pruneVersionKeys(prefix, keep) {
   try {
     Object.keys(localStorage).forEach(function (k) {
@@ -556,9 +537,8 @@ function persistUpdateSkip(newVersion) {
   }).catch(function () { });
 }
 
-// persistUpdateDownloaded records that the asset was saved. Deliberately not
-// the skip flag: a download the user never installs must still be reminded
-// about, otherwise the prompt is lost for that version for good.
+// persistUpdateDownloaded records that the asset was saved — deliberately not
+// the skip flag, so a download the user never installs is still remindable.
 function persistUpdateDownloaded(newVersion) {
   var key = 'thefeed_downloaded_gh_update_' + normalizeVersion(newVersion);
   pruneVersionKeys('thefeed_downloaded_gh_update_', key);
