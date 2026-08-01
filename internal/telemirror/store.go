@@ -8,8 +8,9 @@ import (
 	"sync"
 )
 
-// Store persists the user-added channel list. Defaults are pinned and
-// always returned at the front of List() regardless of the file content.
+// Store persists the user-added channel list. Defaults are listed first, and
+// stay there unless the user removes one — List() re-adds them on every call,
+// so a removal has to be recorded explicitly in Hidden.
 type Store struct {
 	path       string
 	titlesPath string
@@ -26,39 +27,55 @@ func NewStore(dataDir string) *Store {
 
 type subsFile struct {
 	Channels []string `json:"channels"`
+	// Hidden holds defaults the user removed. Absent in files written by
+	// older builds, which simply means nothing is hidden.
+	Hidden []string `json:"hidden,omitempty"`
 }
 
-func (s *Store) loadLocked() []string {
+func (s *Store) loadFileLocked() subsFile {
 	b, err := os.ReadFile(s.path)
 	if err != nil {
-		return nil
+		return subsFile{}
 	}
 	var f subsFile
 	if err := json.Unmarshal(b, &f); err != nil {
-		return nil
+		return subsFile{}
 	}
-	return f.Channels
+	return f
 }
 
-func (s *Store) saveLocked(chs []string) error {
+func (s *Store) saveFileLocked(f subsFile) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(subsFile{Channels: chs}, "", "  ")
+	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(s.path, b, 0600)
 }
 
+func containsFold(list []string, v string) bool {
+	for _, x := range list {
+		if strings.EqualFold(x, v) {
+			return true
+		}
+	}
+	return false
+}
+
 // List returns the full channel list with defaults pinned to the front.
 func (s *Store) List() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	user := s.loadLocked()
+	f := s.loadFileLocked()
+	user := f.Channels
 	seen := make(map[string]bool, len(DefaultChannels)+len(user))
 	out := make([]string, 0, len(DefaultChannels)+len(user))
 	for _, d := range DefaultChannels {
+		if containsFold(f.Hidden, d) {
+			continue
+		}
 		seen[strings.ToLower(d)] = true
 		out = append(out, d)
 	}
@@ -78,18 +95,28 @@ func (s *Store) Add(username string) error {
 	if username == "" {
 		return ErrEmptyUsername
 	}
-	if IsDefault(username) {
-		return nil
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	user := s.loadLocked()
-	for _, u := range user {
-		if strings.EqualFold(u, username) {
+	f := s.loadFileLocked()
+	// Re-adding a default just un-hides it; List() supplies the entry.
+	if IsDefault(username) {
+		if !containsFold(f.Hidden, username) {
 			return nil
 		}
+		kept := f.Hidden[:0]
+		for _, h := range f.Hidden {
+			if !strings.EqualFold(h, username) {
+				kept = append(kept, h)
+			}
+		}
+		f.Hidden = kept
+		return s.saveFileLocked(f)
 	}
-	return s.saveLocked(append(user, username))
+	if containsFold(f.Channels, username) {
+		return nil
+	}
+	f.Channels = append(f.Channels, username)
+	return s.saveFileLocked(f)
 }
 
 // --- channel titles (persisted server-side so they're shared across ports,
@@ -159,17 +186,30 @@ func (s *Store) Remove(username string) error {
 	if username == "" {
 		return ErrEmptyUsername
 	}
-	if IsDefault(username) {
-		return ErrPinnedChannel
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	user := s.loadLocked()
-	out := user[:0]
-	for _, u := range user {
+	f := s.loadFileLocked()
+	// A default is re-added by List() on every call, so record the removal.
+	// Also drop any user-list copy, or List()'s second loop re-adds it.
+	if IsDefault(username) {
+		if !containsFold(f.Hidden, username) {
+			f.Hidden = append(f.Hidden, username)
+		}
+		kept := f.Channels[:0]
+		for _, u := range f.Channels {
+			if !strings.EqualFold(u, username) {
+				kept = append(kept, u)
+			}
+		}
+		f.Channels = kept
+		return s.saveFileLocked(f)
+	}
+	out := f.Channels[:0]
+	for _, u := range f.Channels {
 		if !strings.EqualFold(u, username) {
 			out = append(out, u)
 		}
 	}
-	return s.saveLocked(out)
+	f.Channels = out
+	return s.saveFileLocked(f)
 }

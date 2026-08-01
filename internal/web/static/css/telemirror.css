@@ -256,12 +256,6 @@
       text-overflow: ellipsis
     }
 
-    .tm-pin {
-      font-size: var(--text-2xs);
-      opacity: .55;
-      margin-inline-start: 4px
-    }
-
     .tm-x {
       background: none;
       border: 1px solid transparent;

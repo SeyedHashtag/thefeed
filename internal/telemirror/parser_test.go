@@ -607,10 +607,6 @@ func TestStoreAddRemove(t *testing.T) {
 		t.Errorf("last entry = %q, want MyChan", list[len(list)-1])
 	}
 
-	// Removing a default is rejected.
-	if err := s.Remove(DefaultChannels[0]); err != ErrPinnedChannel {
-		t.Errorf("Remove default = %v, want ErrPinnedChannel", err)
-	}
 	if err := s.Remove("MyChan"); err != nil {
 		t.Errorf("Remove: %v", err)
 	}
@@ -651,5 +647,92 @@ func TestCacheRoundTrip(t *testing.T) {
 	c.Clear()
 	if got, _ := c.Get("test"); got != nil {
 		t.Errorf("Get after Clear returned %+v", got)
+	}
+}
+
+// Defaults are re-added by List() on every call, so a removal only sticks if
+// it is recorded. Users asked to be able to drop the bundled channels.
+func TestStoreRemoveDefault(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	target := DefaultChannels[0]
+
+	if err := s.Remove(target); err != nil {
+		t.Fatalf("Remove default: %v", err)
+	}
+	for _, u := range s.List() {
+		if strings.EqualFold(u, target) {
+			t.Fatalf("%q still listed after Remove: %v", target, s.List())
+		}
+	}
+	// The other defaults are untouched.
+	for _, d := range DefaultChannels[1:] {
+		if !containsFold(s.List(), d) {
+			t.Errorf("Remove(%q) also dropped %q", target, d)
+		}
+	}
+	// Survives a reload — the removal is on disk, not in memory.
+	if got := NewStore(dir).List(); containsFold(got, target) {
+		t.Errorf("%q came back after reload: %v", target, got)
+	}
+	// Re-adding restores it, in its original position.
+	if err := s.Add(target); err != nil {
+		t.Fatalf("Add default back: %v", err)
+	}
+	if got := s.List(); len(got) == 0 || got[0] != target {
+		t.Errorf("after re-add, list[0] = %v, want %q", got, target)
+	}
+	// Removing twice is a no-op, not a duplicate hidden entry.
+	if err := s.Remove(target); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if err := s.Remove(target); err != nil {
+		t.Fatalf("second Remove: %v", err)
+	}
+	if containsFold(s.List(), target) {
+		t.Errorf("%q listed after double Remove", target)
+	}
+}
+
+// A user channel and a hidden default must not interfere.
+func TestStoreHiddenDefaultKeepsUserChannels(t *testing.T) {
+	s := NewStore(t.TempDir())
+	if err := s.Add("MyChan"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := s.Remove(DefaultChannels[0]); err != nil {
+		t.Fatalf("Remove default: %v", err)
+	}
+	got := s.List()
+	if !containsFold(got, "MyChan") {
+		t.Errorf("user channel lost: %v", got)
+	}
+	if containsFold(got, DefaultChannels[0]) {
+		t.Errorf("hidden default still listed: %v", got)
+	}
+}
+
+// A default can also sit in the user list (e.g. a release promotes a channel
+// someone had already added). List() would then re-add it from the user loop,
+// leaving it permanently unremovable.
+func TestRemoveDefaultAlsoInUserList(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir)
+	target := DefaultChannels[0]
+	if err := s.saveFileLocked(subsFile{Channels: []string{target, "MyChan"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Remove(target); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if got := s.List(); containsFold(got, target) {
+		t.Errorf("%q still listed after Remove: %v", target, got)
+	}
+	if got := s.List(); !containsFold(got, "MyChan") {
+		t.Errorf("unrelated user channel lost: %v", got)
+	}
+	// And it stays gone across a reload.
+	if got := NewStore(dir).List(); containsFold(got, target) {
+		t.Errorf("%q returned after reload: %v", target, got)
 	}
 }

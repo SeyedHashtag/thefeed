@@ -458,12 +458,10 @@
       html += '<div class="tm-channel-item' + active + '" data-u="' + tmEscAttr(c.username) + '" onclick="tmSelectFromClick(this.dataset.u)">'
         + tmAvatarHTML(c.username, title, 44)
         + '<div class="tm-channel-item-meta">'
-        + '<div class="tm-channel-item-name">' + tmEsc(title) + (c.pinned ? ' <span class="tm-pin">' + window.icon('pinned') + '</span>' : '') + '</div>'
+        + '<div class="tm-channel-item-name">' + tmEsc(title) + '</div>'
         + '<div class="tm-channel-item-sub">@' + tmEsc(c.username) + '</div>'
         + '</div>';
-      if (!c.pinned) {
-        html += '<button class="tm-x" data-u="' + tmEscAttr(c.username) + '" onclick="event.stopPropagation();tmRemove(this.dataset.u)">&times;</button>';
-      }
+      html += '<button class="tm-x" data-u="' + tmEscAttr(c.username) + '" onclick="event.stopPropagation();tmRemove(this.dataset.u)">&times;</button>';
       html += '</div>';
     }
     box.innerHTML = html || '<div class="tm-empty">' + tmEsc(tmI18n('telemirror_pick_channel', 'Pick a channel')) + '</div>';
@@ -1162,7 +1160,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'remove', username: username })
       });
-      if (!r.ok) { tmToast(tmI18n('telemirror_remove_pinned', 'Cannot remove pinned')); return; }
+      if (!r.ok) { tmToast(tmI18n('telemirror_remove_failed', 'Could not remove channel')); return; }
       if (tmActive.toLowerCase() === username.toLowerCase()) {
         tmActive = '';
         tmSaveActive();
