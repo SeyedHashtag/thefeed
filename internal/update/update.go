@@ -61,6 +61,15 @@ func stopOnRedirect(req *http.Request, via []*http.Request) error {
 // downloading executable code or updating itself outside the store. Set by
 // mobile.NewAndroidPlayServer; never set by the GitHub/desktop builds.
 func StoreBuild() bool {
+	// iOS ships only through the App Store / TestFlight, and Apple's rule on
+	// downloading executable code matches Google's. gomobile builds the iOS
+	// framework with GOOS=ios, so this needs no Swift change and no new
+	// binding. The macOS .dmg is a separate GOOS=darwin binary and keeps its
+	// updater; the macOS TestFlight app is this same iOS build, and correctly
+	// does not.
+	if runtime.GOOS == "ios" {
+		return true
+	}
 	return os.Getenv("THEFEED_STORE_BUILD") == "1"
 }
 

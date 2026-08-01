@@ -4,6 +4,10 @@
 
 [English](README.md) · [فارسی](README-FA.md) · 简体中文 · [Русский](README-RU.md)
 
+[![Google Play](https://img.shields.io/badge/Google%20Play-Install-3DDC84?style=for-the-badge&logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=com.thefeed.android)
+[![TestFlight](https://img.shields.io/badge/iOS-TestFlight%20beta-0D96F6?style=for-the-badge&logo=apple&logoColor=white)](https://testflight.apple.com/join/J6bfxDdZ)
+[![Latest release](https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-Latest%20release-24292F?style=for-the-badge&logo=github&logoColor=white)](https://github.com/sartoopjj/thefeed/releases/latest)
+
 **目录：** [安装应用](#install-app) · [搭建服务器](#run-server) · [私信通道](#messenger) · [工作原理](#how-it-works) · [安全](#security) · [从源码构建](#build) · [参考](#reference) · [链接](#links)
 
 ## 截图
@@ -35,7 +39,7 @@
 
 | 平台 | 说明 |
 |------|------|
-| **Android**（7.0+） | APK。选 `arm64-v8a`（约 2017 年后的手机）或 `armeabi-v7a`（仅限老的 32 位机型）。装错架构会安装成功但无法运行。 |
+| **Android**（7.0+） | 最简单：**[Google Play](https://play.google.com/store/apps/details?id=com.thefeed.android)** — 自动安装与更新。否则使用 APK。选 `arm64-v8a`（约 2017 年后的手机）或 `armeabi-v7a`（仅限老的 32 位机型）。装错架构会安装成功但无法运行。 |
 | **iOS**（13+） | 通过 **[TestFlight](https://testflight.apple.com/join/J6bfxDdZ)** 安装。App Store 版本计划中；也可从 [ios/](ios/) 源码自行构建 —— 见 [从源码构建](#build)。 |
 | **Windows**（10/11） | `.exe` **未签名**，因此 SmartScreen 会弹出 *"Windows protected your PC"*，Defender 可能会隔离它 —— 这是 DNS 隧道工具常见的**误报，并非恶意软件**。点 **More info → Run anyway**；若被删除，从 Defender → *Protection history* 恢复；不放心可核对发布页的 SHA-256。 |
 | **macOS** | 通用 `.dmg`（Intel + Apple Silicon），拖动安装 `Thefeed.app`。未签名，首次启动请右键 → **Open**，或运行 `xattr -dr com.apple.quarantine /Applications/Thefeed.app`。 |

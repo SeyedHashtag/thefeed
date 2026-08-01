@@ -6,6 +6,10 @@
 
 [English](README.md) · فارسی · [简体中文](README-ZH.md) · [Русский](README-RU.md)
 
+[![Google Play](https://img.shields.io/badge/Google%20Play-Install-3DDC84?style=for-the-badge&logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=com.thefeed.android)
+[![TestFlight](https://img.shields.io/badge/iOS-TestFlight%20beta-0D96F6?style=for-the-badge&logo=apple&logoColor=white)](https://testflight.apple.com/join/J6bfxDdZ)
+[![Latest release](https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-Latest%20release-24292F?style=for-the-badge&logo=github&logoColor=white)](https://github.com/sartoopjj/thefeed/releases/latest)
+
 **فهرست:** [نصب برنامه](#install-app) · [راه‌اندازی سرور](#run-server) · [پیام‌رسان](#messenger) · [طرز کار](#how-it-works) · [امنیت](#security) · [ساخت از سورس](#build) · [مرجع](#reference) · [لینک‌ها](#links)
 
 ## تصاویر
@@ -39,7 +43,7 @@
 
 | پلتفرم | توضیح |
 |--------|-------|
-| **اندروید** (۷ به بالا) | فایل APK. نسخهٔ `arm64-v8a` (گوشی‌های تقریباً بعد از ۱۳۹۶) یا `armeabi-v7a` (فقط دستگاه‌های قدیمی ۳۲ بیتی). نصب نسخهٔ اشتباه انجام می‌شود ولی اجرا نمی‌شود. |
+| **اندروید** (۷ به بالا) | ساده‌ترین راه: **[گوگل پلی](https://play.google.com/store/apps/details?id=com.thefeed.android)** — نصب و به‌روزرسانی خودکار. در غیر این صورت فایل APK. نسخهٔ `arm64-v8a` (گوشی‌های تقریباً بعد از ۱۳۹۶) یا `armeabi-v7a` (فقط دستگاه‌های قدیمی ۳۲ بیتی). نصب نسخهٔ اشتباه انجام می‌شود ولی اجرا نمی‌شود. |
 | **iOS** (۱۳ به بالا) | نصب از طریق **[TestFlight](https://testflight.apple.com/join/J6bfxDdZ)**. نسخهٔ App Store در برنامهٔ کار است؛ می‌توانید از سورس در پوشهٔ [ios/](ios/) هم بسازید — بخش [ساخت از سورس](#build). |
 | **ویندوز** (۱۰/۱۱) | فایل `.exe` **امضای دیجیتال ندارد**، برای همین SmartScreen پیام «Windows protected your PC» می‌دهد و ممکن است Defender آن را قرنطینه کند — هشدار اشتباه رایج برای ابزارهای تونل DNS، **نه بدافزار**. روی **More info → Run anyway** بزنید؛ اگر حذف شد از Defender → *Protection history* برش گردانید و در صورت تردید هش SHA-256 صفحهٔ انتشار را بررسی کنید. |
 | **مک** | فایل `.dmg` یونیورسال (اینتل + Apple Silicon) که با کشیدن، `Thefeed.app` را نصب می‌کند. امضا نشده، پس در اولین اجرا یا در Finder راست‌کلیک → **Open**، یا در ترمینال: `xattr -dr com.apple.quarantine /Applications/Thefeed.app`. |

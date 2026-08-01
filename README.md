@@ -4,6 +4,10 @@ DNS-based **feed reader and lite messenger** for networks where only DNS gets th
 
 [English](README.md) · [فارسی](README-FA.md) · [简体中文](README-ZH.md) · [Русский](README-RU.md)
 
+[![Google Play](https://img.shields.io/badge/Google%20Play-Install-3DDC84?style=for-the-badge&logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=com.thefeed.android)
+[![TestFlight](https://img.shields.io/badge/iOS-TestFlight%20beta-0D96F6?style=for-the-badge&logo=apple&logoColor=white)](https://testflight.apple.com/join/J6bfxDdZ)
+[![Latest release](https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-Latest%20release-24292F?style=for-the-badge&logo=github&logoColor=white)](https://github.com/sartoopjj/thefeed/releases/latest)
+
 **Contents:** [Install the app](#install-the-app) · [Run a server](#run-a-server) · [Messenger](#messenger) · [How it works](#how-it-works) · [Security](#security) · [Build from source](#build-from-source) · [Reference](#reference) · [Links](#links--donate)
 
 ## Screenshots
@@ -33,7 +37,7 @@ Download the client for your platform from the latest release — pick the mirro
 
 | Platform | Notes |
 |----------|-------|
-| **Android** (7.0+) | APK. Pick `arm64-v8a` (phones since ~2017) or `armeabi-v7a` (older 32-bit only). Installing the wrong ABI installs but won't run. |
+| **Android** (7.0+) | Easiest: **[Google Play](https://play.google.com/store/apps/details?id=com.thefeed.android)** — installs and updates itself. Otherwise the APK. Pick `arm64-v8a` (phones since ~2017) or `armeabi-v7a` (older 32-bit only). Installing the wrong ABI installs but won't run. |
 | **iOS** (13+) | Install via **[TestFlight](https://testflight.apple.com/join/J6bfxDdZ)**. App Store build is planned; you can also build from source under [ios/](ios/) — see [Build from source](#build-from-source). |
 | **Windows** (10/11) | The `.exe` is **unsigned**, so SmartScreen shows *"Windows protected your PC"* and Defender may quarantine it — a known false positive for DNS-tunneling tools, **not malware**. Click **More info → Run anyway**; restore from Defender → *Protection history* if removed; verify the SHA-256 from the release page if unsure. |
 | **macOS** | Universal `.dmg` (Intel + Apple Silicon), drag-installs `Thefeed.app`. Unsigned, so on first launch either right-click → **Open**, or run `xattr -dr com.apple.quarantine /Applications/Thefeed.app`. |

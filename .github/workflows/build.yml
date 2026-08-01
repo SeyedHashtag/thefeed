@@ -452,6 +452,14 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           append_body: true
           body: |
+            ## Install
+
+            [![Google Play](https://img.shields.io/badge/Google%20Play-Install-3DDC84?style=for-the-badge&logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=com.thefeed.android)
+            [![TestFlight](https://img.shields.io/badge/iOS-TestFlight%20beta-0D96F6?style=for-the-badge&logo=apple&logoColor=white)](https://testflight.apple.com/join/J6bfxDdZ)
+
+            Android and iOS install and update themselves through the store.
+            Every other platform downloads from the table below.
+
             ## Downloads
 
             | Platform | Architecture | Download |

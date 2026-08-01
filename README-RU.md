@@ -4,6 +4,10 @@
 
 [English](README.md) · [فارسی](README-FA.md) · [简体中文](README-ZH.md) · Русский
 
+[![Google Play](https://img.shields.io/badge/Google%20Play-Install-3DDC84?style=for-the-badge&logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=com.thefeed.android)
+[![TestFlight](https://img.shields.io/badge/iOS-TestFlight%20beta-0D96F6?style=for-the-badge&logo=apple&logoColor=white)](https://testflight.apple.com/join/J6bfxDdZ)
+[![Latest release](https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-Latest%20release-24292F?style=for-the-badge&logo=github&logoColor=white)](https://github.com/sartoopjj/thefeed/releases/latest)
+
 **Содержание:** [Установка приложения](#install-app) · [Запуск сервера](#run-server) · [Мессенджер](#messenger) · [Как это работает](#how-it-works) · [Безопасность](#security) · [Сборка из исходников](#build) · [Справочник](#reference) · [Ссылки](#links)
 
 ## Скриншоты
@@ -35,7 +39,7 @@
 
 | Платформа | Примечание |
 |-----------|------------|
-| **Android** (7.0+) | APK. Выберите `arm64-v8a` (телефоны примерно с 2017 г.) или `armeabi-v7a` (только старые 32-битные). Неверная архитектура установится, но не запустится. |
+| **Android** (7.0+) | Проще всего: **[Google Play](https://play.google.com/store/apps/details?id=com.thefeed.android)** — установка и обновления автоматически. Иначе APK. Выберите `arm64-v8a` (телефоны примерно с 2017 г.) или `armeabi-v7a` (только старые 32-битные). Неверная архитектура установится, но не запустится. |
 | **iOS** (13+) | Установка через **[TestFlight](https://testflight.apple.com/join/J6bfxDdZ)**. Сборка для App Store в планах; также можно собрать из исходников в [ios/](ios/) — см. [Сборка из исходников](#build). |
 | **Windows** (10/11) | `.exe` **не подписан**, поэтому SmartScreen покажет *«Windows protected your PC»*, а Defender может поместить его в карантин — это известное **ложное срабатывание** для DNS-туннелей, **не вирус**. Нажмите **More info → Run anyway**; если удалён — восстановите из Defender → *Protection history*; при сомнениях сверьте SHA-256 со страницы релиза. |
 | **macOS** | Универсальный `.dmg` (Intel + Apple Silicon), устанавливает `Thefeed.app` перетаскиванием. Не подписан: при первом запуске правый клик → **Open** или `xattr -dr com.apple.quarantine /Applications/Thefeed.app`. |
