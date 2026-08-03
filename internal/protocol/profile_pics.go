@@ -86,7 +86,7 @@ func EncodeProfilePicsBundle(b ProfilePicsBundle) []byte {
 	}
 	size := profilePicsHeaderFixed + relayCount + 2 /*entry count*/
 	for _, e := range b.Entries {
-		size += 1 + len(truncateUTF8Bytes(e.Username, 255)) + profilePicEntryFixed
+		size += 1 + len(truncateUTF8(e.Username, 255)) + profilePicEntryFixed
 	}
 	buf := make([]byte, size)
 	off := 0
@@ -105,7 +105,7 @@ func EncodeProfilePicsBundle(b ProfilePicsBundle) []byte {
 	binary.BigEndian.PutUint16(buf[off:], uint16(len(b.Entries)))
 	off += 2
 	for _, e := range b.Entries {
-		nb := truncateUTF8Bytes(e.Username, 255)
+		nb := truncateUTF8(e.Username, 255)
 		buf[off] = byte(len(nb))
 		off++
 		copy(buf[off:], nb)

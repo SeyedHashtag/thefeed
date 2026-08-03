@@ -207,3 +207,19 @@ func TestDecodeVersionDataTooShort(t *testing.T) {
 		t.Error("expected error for 1-byte block")
 	}
 }
+
+// truncateUTF8 returns a string so the size pass can measure without copying.
+// Returning []byte instead makes every name escape to the heap — two extra
+// allocations per channel, one per pass.
+func TestSerializeMetadataAllocations(t *testing.T) {
+	chs := make([]ChannelInfo, 50)
+	for i := range chs {
+		chs[i] = ChannelInfo{Name: "channel_کانال_" + string(rune('a'+i%26)), Blocks: 3}
+	}
+	md := &Metadata{Channels: chs}
+	got := testing.AllocsPerRun(50, func() { _ = SerializeMetadata(md) })
+	// Only the output buffer itself.
+	if got > 2 {
+		t.Errorf("SerializeMetadata allocates %.0f times for %d channels, want <= 2", got, len(chs))
+	}
+}
