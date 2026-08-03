@@ -4,12 +4,13 @@ import (
 	"hash/crc32"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestEncodeDecodeProfilePicsBundleRoundTrip(t *testing.T) {
 	// Three avatars concatenated into a fake bundle, with offsets/CRCs
 	// computed for real so VerifyEntry doesn't trip on them.
-	a := []byte("aaaaaaaaaa")    // 10 bytes
+	a := []byte("aaaaaaaaaa")     // 10 bytes
 	b := []byte("bbbbbbbbbbbbbb") // 14 bytes
 	c := []byte("ccccc")          // 5 bytes
 	bundle := append(append(append([]byte{}, a...), b...), c...)
@@ -120,6 +121,33 @@ func TestProfilePicsTruncatesLongUsername(t *testing.T) {
 	}
 	if len(got.Entries) != 1 || len(got.Entries[0].Username) != 255 {
 		t.Errorf("expected 1 entry with 255-char username, got %+v", got.Entries)
+	}
+}
+
+func TestProfilePicsTruncatesLongUTF8Username(t *testing.T) {
+	long := strings.Repeat("u", 254) + "نام"
+	in := ProfilePicsBundle{
+		Header: ProfilePicsBundleHeader{Relays: []bool{true}},
+		Entries: []ProfilePicEntry{
+			{Username: long, Offset: 0, Size: 100, CRC: 1, MIME: 0},
+		},
+	}
+	got, err := DecodeProfilePicsBundle(EncodeProfilePicsBundle(in))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(got.Entries))
+	}
+	username := got.Entries[0].Username
+	if !utf8.ValidString(username) {
+		t.Fatalf("truncated username is invalid UTF-8: %q", username)
+	}
+	if len(username) > 255 {
+		t.Fatalf("truncated username is %d bytes, want <= 255", len(username))
+	}
+	if username != strings.Repeat("u", 254) {
+		t.Fatalf("truncated username = %q", username)
 	}
 }
 
